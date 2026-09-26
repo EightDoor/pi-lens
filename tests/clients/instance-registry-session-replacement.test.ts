@@ -140,6 +140,33 @@ describe("instance registry across a session replacement (#3498)", () => {
 		expect(shutdownRan).toBe(true);
 	}
 
+	/**
+	 * The #3587 sibling of `shutdownDuringHeartbeat`: a declined secondary's
+	 * root removal fires while the heartbeat's read of the registry is in
+	 * flight, so `deregisterInstanceRootNow`'s sync attempt — which now runs
+	 * from inside the registry tail, not at process exit — meets this
+	 * process's own hold instead of a shutdown's. `deregisterInstanceRoot`
+	 * (unlike `deregisterInstance`) already runs on the tail, so settling the
+	 * tail below waits through the queued fallback too.
+	 */
+	async function rootRemovalDuringHeartbeat(root: string): Promise<void> {
+		const readFile = fs.promises.readFile.bind(fs.promises);
+		let removalStarted = false;
+		vi.spyOn(fs.promises, "readFile").mockImplementation((async (
+			...args: Parameters<typeof fs.promises.readFile>
+		) => {
+			if (!removalStarted && args[0] === registryFilePath()) {
+				removalStarted = true;
+				void registry.deregisterInstanceRoot(root);
+			}
+			return readFile(...args);
+		}) as typeof fs.promises.readFile);
+		await registry.updateHeartbeat();
+		vi.restoreAllMocks();
+		await registry._settleRegistryMutationsForTests();
+		expect(removalStarted).toBe(true);
+	}
+
 	it("removes the entry when shutdown lands while this process's heartbeat holds the lock", async () => {
 		await registry.registerInstance(ROOT_A);
 		await shutdownDuringHeartbeat();
@@ -221,6 +248,22 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await registry._settleRegistryMutationsForTests();
 		expect(ownEntry()).toBeUndefined();
 		await expectSessionTwoRegistersAlone();
+	});
+
+	it("removes a secondary root when its removal lands while this process's own heartbeat holds the lock (#3587)", async () => {
+		await registry.registerInstance(ROOT_A);
+		await registry.registerInstanceRoot(ROOT_SECONDARY);
+		await rootRemovalDuringHeartbeat(ROOT_SECONDARY);
+
+		expect(degradationCount("instance-registry-lock-timeout")).toBe(1);
+		expect(
+			ledger
+				.getDegradationSummary()
+				.find((group) => group.kind === "instance-registry-deregister-queued")
+				?.latestReasons[0]?.reason,
+		).toMatch(/queued behind the holder/);
+		expect(degradationCount("instance-registry-deregister-landed")).toBe(1);
+		expect(ownEntry()?.projectRoots).toEqual([normalizeFilePath(ROOT_A)]);
 	});
 
 	it("still points the heartbeat's repair at a root the live session keeps serving", async () => {

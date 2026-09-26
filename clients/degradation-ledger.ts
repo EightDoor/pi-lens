@@ -383,15 +383,19 @@ export type DegradationKind =
 	/** A busy notify-stall discriminator was deferred; detail is rising-edge bounded. */
 	| "instance-registry-corrupt"
 	/**
-	 * #3498: the removal `deregisterInstance` queued took the registry lock
-	 * and ran, whether or not the entry was still there. A queued removal
-	 * with no landed record was lost (host exit, or the lock never came).
-	 * Subject is this process's pid.
+	 * #3498: a removal queued by `deregisterInstance` (whole entry, at
+	 * shutdown) or `deregisterInstanceRoot` (one root, #3587) took the
+	 * registry lock and ran, whether or not there was still anything to
+	 * remove. A queued removal with no landed record was lost (host exit, or
+	 * the lock never came). Subject is this process's pid.
 	 */
 	| "instance-registry-deregister-landed"
 	/**
-	 * #3498: `deregisterInstance`'s sync removal could not take the registry
-	 * lock, so the removal was queued on the registry tail behind the holder.
+	 * #3498: the sync removal `deregisterInstance` or `deregisterInstanceRoot`
+	 * (#3587) attempts first could not take the registry lock, so it was
+	 * queued behind the holder — on the registry tail for `deregisterInstance`
+	 * (which itself runs off the tail, at shutdown), or in place on the same
+	 * tail slot for `deregisterInstanceRoot` (which already runs on it).
 	 * Subject is this process's pid.
 	 */
 	| "instance-registry-deregister-queued"
