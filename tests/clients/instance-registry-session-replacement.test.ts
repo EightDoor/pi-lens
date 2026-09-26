@@ -273,6 +273,8 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstance(ROOT_B);
 		await registry.deregisterInstanceRoot(ROOT_B);
+		// The sync attempt took the lock uncontended (#3587): nothing was queued.
+		expect(degradationCount("instance-registry-deregister-queued")).toBe(0);
 		fs.writeFileSync(registryFilePath(), JSON.stringify({ instances: [] }));
 
 		await registry.updateHeartbeat();
