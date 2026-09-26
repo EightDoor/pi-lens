@@ -344,4 +344,18 @@ describe("instance registry across a session replacement (#3498)", () => {
 		expect(ownEntry()).toBeUndefined();
 		await expectSessionTwoRegistersAlone();
 	}, 15_000);
+
+	it("removes a secondary root after a peer holds the lock past the sync wait and one async wait (#3587)", async () => {
+		await registry.registerInstance(ROOT_A);
+		await registry.registerInstanceRoot(ROOT_SECONDARY);
+		// Same shape as the whole-entry case above: the peer's lock ages out of
+		// the 5 s lease about 2 s from now, past the 500 ms sync wait and one
+		// ordinary 500 ms async wait, but inside `LOCK_WAIT_THROUGH_LEASE_MS`.
+		peerHolds(3_000);
+		const removal = registry.deregisterInstanceRoot(ROOT_SECONDARY);
+		await removal;
+		await registry._settleRegistryMutationsForTests();
+
+		expect(ownEntry()?.projectRoots).toEqual([normalizeFilePath(ROOT_A)]);
+	}, 15_000);
 });
