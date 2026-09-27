@@ -138,7 +138,7 @@ To resume, start fresh agents from the `wip/` refs, using each row's "What remai
 
 ## 6. Hourly routine
 
-Routine `trig_01MUZ9yybcCCrs27t3DPFVif` ("Process TLA follow-up queue (#3518)", cron `31 * * * *`) is bound to the **old** session. It encodes the directives in §0.
+Routine `trig_01MUZ9yybcCCrs27t3DPFVif` ("Process TLA follow-up queue (#3518)", cron `31 * * * *`) is bound to the **old** session. It encodes the directives in §0. **It is DISABLED (09:36, at the maintainer's request).** The next orchestrator should create its own routine bound to its own session instead of re-enabling this one.
 - **To continue:** create a new routine bound to the new session, with the same prompt (retrieve it via `get_trigger`).
 - **Otherwise:** disable the old one so it does not fire into a dead session.
 
