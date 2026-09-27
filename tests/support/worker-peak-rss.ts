@@ -74,11 +74,11 @@ export function peakRssProblem(
 
 /**
  * #3565: how close to its ceiling a file may peak before its record carries a
- * warning. Over 14 CI runs two files peaked 5-175 MB under the budget, and one
- * of them went red at 2,052 MB on PR #3597, which touched nothing it loads.
- * 200 MB is above the largest same-code spread measured on CI
- * (`index-integration`, 1,873-2,065 MB), so a file that can go red on noise
- * warns on its ordinary runs first.
+ * warning. Over 18 CI runs `vi-mock-export-sweep` peaked at 2,026-2,049 MB
+ * and `index-integration` at 1,873-2,052 MB against the 2,048 MB budget, and
+ * each went red on a commit that touched nothing it loads. 200 MB is above the
+ * largest same-code spread measured on CI (`index-integration`, 1,873-2,065
+ * MB), so a file that can go red on noise warns on its ordinary runs first.
  */
 export const PEAK_RSS_HEADROOM_WARN_MB = 200;
 

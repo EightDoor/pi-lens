@@ -46,9 +46,9 @@ const BASELINE: Record<string, number> = JSON.parse(
  * between files. `@ast-grep/napi` frees a dropped tree's native memory from a
  * finalizer that only runs once the loop turns, so a synchronous pass over the
  * ~1,300-file population held every transient tree it parsed until the case
- * ended: a 1,973 MB peak beside an 84 MB heap locally, and 2,029-2,043 MB over
- * 14 CI runs against the 2,048 MB per-worker budget. One turn per file
- * measured about 800 MB, with the same findings and wall time.
+ * ended: a 1,973 MB peak beside an 84 MB heap locally, and 2,026-2,049 MB over
+ * 18 CI runs against the 2,048 MB per-worker budget (red at 2,049 MB). One
+ * turn per file measured 930-996 MB, with the same findings and wall time.
  */
 async function detectAcrossFiles(
 	files: string[],

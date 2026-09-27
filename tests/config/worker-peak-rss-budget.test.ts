@@ -129,10 +129,10 @@ describe("#3058 per-file peak RSS is registered or fails", () => {
 	});
 
 	it("warns inside the headroom band before the gate goes red (#3565)", () => {
-		// Recurrence: over 14 CI runs vi-mock-export-sweep and index-integration
-		// peaked 5-175 MB under the budget, and index-integration went red on
-		// #3597, a PR that touched nothing it loads. The band is the only signal
-		// that arrives before the red.
+		// Recurrence: over 18 CI runs vi-mock-export-sweep (2,026-2,049 MB) and
+		// index-integration (1,873-2,052 MB) straddled the 2,048 MB budget, and
+		// each went red on a commit that touched nothing it loads. The band is
+		// the only signal that arrives before the red.
 		const edge = WORKER_PEAK_RSS_BUDGET_MB - PEAK_RSS_HEADROOM_WARN_MB;
 		const record = (peak: number) =>
 			`[mem-file] peakRssMb=${peak} heapUsedMb=12 externalMb=3 tests/fixture/heavy.test.ts\n`;

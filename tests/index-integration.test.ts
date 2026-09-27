@@ -175,7 +175,8 @@ afterEach(() => {
  * peak therefore depended on when that happened: 1,873-2,065 MB across CI
  * runs of the same code, against the 2,048 MB per-worker budget (#3058),
  * while the live heap after a collection stayed near 500 MB. One collection
- * per case measured an 882 MB peak locally, for about 14 s of extra wall time.
+ * per case measured 882-916 MB peaks locally; the 65 collections summed to
+ * 13.7 s in the one run that timed them.
  *
  * The collector is exposed the way `word-index-posting-memory.test.ts`
  * exposes it: `setFlagsFromString` for this fork only, and the flag is turned
