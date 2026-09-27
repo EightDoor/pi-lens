@@ -2036,8 +2036,15 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 			).toBeNull();
 		});
 
-		it("bare ~ alone expands too", () => {
-			expect(findDeny("git worktree add ~", PAYLOAD_CWD)).toBeNull();
+		it("bare ~ alone expands too, even when cwd is itself under /tmp", () => {
+			// A cwd OFF /tmp would allow this even if `~` were left unexpanded
+			// (the unresolved literal is still a relative path that resolves
+			// off-tmp against an off-tmp cwd) -- this must use an UNDER-/tmp
+			// cwd, the same way the `~/…` cases above do, so the assertion
+			// actually depends on the bare-`~` branch running.
+			expect(
+				findDeny("git worktree add ~", "/tmp/some-review-worktree"),
+			).toBeNull();
 		});
 	});
 });

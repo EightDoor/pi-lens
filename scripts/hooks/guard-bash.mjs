@@ -868,15 +868,18 @@ function isUnderTmpRoot(absoluteDir) {
  * with an ambient, non-command-text `TMPDIR` pointed off /tmp must allow,
  * and it does not without this fallback), then `TMP_ROOT` -- the real
  * default `os.tmpdir()`/bash/mktemp all fall back to. Any OTHER variable
- * with no known value stops the loop and leaves the reference as literal
- * text (a documented blind spot, matching this file's others: an unknown
- * `$NAME` cannot be resolved by a static scan, and leaving it literal is
- * the safe direction -- it resolves as a relative path segment against
- * `cwd` in {@link pathResolvesUnderTmp}, which allows unless `cwd` itself is
- * under `/tmp`, never a false allow of a genuine `/tmp` destination this
- * scan COULD have resolved). The name boundary matches {@link
- * HARNESS_HOME_VARIABLE}'s reasoning: `$TMPDIRECTORY` names a different
- * variable.
+ * with no known value leaves the reference as a literal `undefined`-prefixed
+ * string, and the loop then finds no further `$NAME` match and stops on its
+ * own next iteration (a documented blind spot, matching this file's others:
+ * an unknown `$NAME` cannot be resolved by a static scan, and this fallthrough
+ * is the safe direction -- the literal text still resolves as a relative path
+ * segment against `cwd` in {@link pathResolvesUnderTmp}, which allows unless
+ * `cwd` itself is under `/tmp`, never a false allow of a genuine `/tmp`
+ * destination this scan COULD have resolved; measured mutation-inert against
+ * the alternative of an explicit early `break` -- both leave the same final
+ * under-/tmp verdict, so the special case was deleted). The name boundary
+ * matches {@link HARNESS_HOME_VARIABLE}'s reasoning: `$TMPDIRECTORY` names a
+ * different variable.
  *
  * @param {string} pathArg
  * @param {Record<string, string>} env
