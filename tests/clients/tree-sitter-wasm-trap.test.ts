@@ -155,9 +155,10 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 		expect(onAbort).not.toHaveBeenCalled();
 		expect(kindCount("wasm-trap")).toBe(WASM_TRAP_BUDGET);
 
-		expect(client.reportWasmAbort(trap("memory access out of bounds"))).toBe(
-			true,
-		);
+		const escalating = trap("memory access out of bounds");
+		expect(client.reportWasmAbort(escalating)).toBe(true);
+		// A second site reporting the same trap still hears "runtime dead".
+		expect(client.reportWasmAbort(escalating)).toBe(true);
 
 		expect(onAbort).toHaveBeenCalledTimes(1);
 		const abort = getDegradationSummary().find((g) => g.kind === "wasm-abort");
@@ -174,8 +175,8 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 		const { client } = await liveClient();
 		const error = trap();
 
-		client.reportWasmAbort(error);
-		client.reportWasmAbort(error);
+		expect(client.reportWasmAbort(error)).toBe(false);
+		expect(client.reportWasmAbort(error)).toBe(false);
 
 		expect(kindCount("wasm-trap")).toBe(1);
 	});
