@@ -61,6 +61,7 @@ import {
 	type ReviewGraphPersistenceMetadata,
 } from "../review-graph-logger.js";
 import { getSharedTreeSitterClient } from "../tree-sitter-shared.js";
+import { classifyTreeSitterWasmError } from "../tree-sitter-client.js";
 import {
 	type ExtractedSymbols,
 	symbolExtractionGrammar,
@@ -6052,10 +6053,13 @@ export function buildOrUpdateGraph(
 		})
 		.catch((err) => {
 			const reason = err instanceof Error ? err.message : String(err);
+			const wasmFailure = classifyTreeSitterWasmError(err);
 			recordBuildAttempt(cwd, "failed", reason, buildId);
 			logReviewGraph({
 				cwd,
 				phase: "build_failed",
+				// #3605: an internal wasm failure, not a failed build.
+				failureClass: wasmFailure ? `wasm-${wasmFailure}` : "error",
 				reason,
 				durationMs: Date.now() - startedAt,
 				error: reason,

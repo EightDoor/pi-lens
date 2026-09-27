@@ -1349,6 +1349,14 @@ export type DegradationKind =
 	 */
 	| "wasm-abort"
 	/**
+	 * #3605: web-tree-sitter trapped (`memory access out of bounds`, `table
+	 * index is out of bounds`, ...) while parsing or querying one file. That
+	 * file degrades to not-parsed, and the parsers and tree cache are
+	 * recycled. Counted; past `WASM_TRAP_BUDGET` the next trap becomes a
+	 * `wasm-abort`. Subject is always `web-tree-sitter`.
+	 */
+	| "wasm-trap"
+	/**
 	 * #2626: `resources_discover` (#205) resolved `<packageRoot>/skills` to a
 	 * directory that is absent, unreadable, or holds no `SKILL.md` — pi then
 	 * registers zero skills with no extension error and no stderr. Fires on
