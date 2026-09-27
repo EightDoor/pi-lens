@@ -142,12 +142,13 @@ describe("instance registry across a session replacement (#3498)", () => {
 
 	/**
 	 * The #3587 sibling of `shutdownDuringHeartbeat`: a declined secondary's
-	 * root removal fires while the heartbeat's read of the registry is in
-	 * flight, so `deregisterInstanceRootNow`'s sync attempt — which now runs
-	 * from inside the registry tail, not at process exit — meets this
-	 * process's own hold instead of a shutdown's. `deregisterInstanceRoot`
-	 * (unlike `deregisterInstance`) already runs on the tail, so settling the
-	 * tail below waits through the queued fallback too.
+	 * root removal is requested while the heartbeat's read of the registry is
+	 * in flight. `deregisterInstanceRoot` (unlike `deregisterInstance`)
+	 * already runs on the registry tail — and since #3602, so does
+	 * `updateHeartbeat` — so this no longer races the heartbeat for the file
+	 * lock: it queues behind it and starts its sync attempt only once the
+	 * heartbeat's mutation has fully resolved (lock released). See "queues a
+	 * secondary root's removal behind an in-flight heartbeat" below.
 	 */
 	async function rootRemovalDuringHeartbeat(root: string): Promise<void> {
 		const readFile = fs.promises.readFile.bind(fs.promises);
@@ -250,19 +251,24 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await expectSessionTwoRegistersAlone();
 	});
 
-	it("removes a secondary root when its removal lands while this process's own heartbeat holds the lock", async () => {
+	// #3602: before that fix, `updateHeartbeat` took the registry lock
+	// directly (off the tail), so a root removal requested while it held the
+	// lock met this process's OWN hold — the #3587 shape this file's own
+	// mutation table (PR #3593/#3587's R1) exercises via a peer instead below.
+	// Now `updateHeartbeat` is queued through the SAME tail as
+	// `deregisterInstanceRoot`, so the two can never hold the lock at once:
+	// the removal simply waits its turn and its first sync attempt succeeds
+	// uncontended, once it is the removal's turn.
+	it("queues a secondary root's removal behind an in-flight heartbeat instead of racing it for the lock", async () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstanceRoot(ROOT_SECONDARY);
 		await rootRemovalDuringHeartbeat(ROOT_SECONDARY);
 
-		expect(degradationCount("instance-registry-lock-timeout")).toBe(1);
-		expect(
-			ledger
-				.getDegradationSummary()
-				.find((group) => group.kind === "instance-registry-deregister-queued")
-				?.latestReasons[0]?.reason,
-		).toMatch(/queued behind the holder/);
-		expect(degradationCount("instance-registry-deregister-landed")).toBe(1);
+		// Queued behind the heartbeat's own tail slot, not contended for the
+		// lock: none of the own-hold retry machinery fires.
+		expect(degradationCount("instance-registry-lock-timeout")).toBe(0);
+		expect(degradationCount("instance-registry-deregister-queued")).toBe(0);
+		expect(degradationCount("instance-registry-deregister-landed")).toBe(0);
 		expect(ownEntry()?.projectRoots).toEqual([normalizeFilePath(ROOT_A)]);
 	});
 
