@@ -653,7 +653,7 @@ describe("instance-registry", () => {
 		// the write, find no own entry, and — because the intent was already
 		// set — record a spurious missing-registration and queue a redundant
 		// re-register.
-		it("does not record a spurious missing-registration when a heartbeat lands between the intent write and the registration's own write (#3602)", async () => {
+		it("does not record a spurious missing-registration when a heartbeat lands between the intent write and the registration's own write", async () => {
 			const processSnapshot = await import("../../clients/process-snapshot.js");
 			const {
 				registerInstance,
