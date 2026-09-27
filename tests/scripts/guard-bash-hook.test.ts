@@ -47,6 +47,21 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
 const HOOK = join(repoRoot, "scripts", "hooks", "guard-bash.mjs");
 
+// The PreToolUse payload cwd every test in this file uses by default --
+// deliberately NOT `repoRoot` (#3526 review S1). `repoRoot` is wherever
+// THIS checkout happens to live, and a reviewer's own worktree convention
+// puts that under `/tmp`: run there, and every relative-path exemption
+// ALLOW row (".claude/worktrees/…", the "resolves under this worktree's own
+// cwd" test) falsely denied, because the same /tmp root that the fix is
+// SUPPOSED to catch was also, coincidentally, this suite's own cwd. A fixed,
+// synthetic, guaranteed-off-/tmp path makes every relative-resolution
+// assertion here true regardless of where the checkout lives -- it never
+// needs to exist on disk, since none of guard-bash's path-resolution rules
+// touch the filesystem at `cwd` itself (only at a RESOLVED worktree/mktemp
+// argument, e.g. the node_modules-symlink-hazard fixtures below, which
+// build real directories for exactly that reason).
+const PAYLOAD_CWD = "/home/dev/pi-lens-guard-bash-fixed-cwd";
+
 // Every env var this suite's own process runs under, MINUS PI_LENS_HOME --
 // so a negative (deny) case can never pass because the outer test runner
 // happens to have PI_LENS_HOME set (probe hygiene: this repo's own worktree
@@ -56,11 +71,15 @@ const BASE_ENV: NodeJS.ProcessEnv = Object.fromEntries(
 	Object.entries(process.env).filter(([key]) => key !== "PI_LENS_HOME"),
 );
 
-function runHook(command: string, env: NodeJS.ProcessEnv = BASE_ENV) {
+function runHook(
+	command: string,
+	env: NodeJS.ProcessEnv = BASE_ENV,
+	cwd: string = PAYLOAD_CWD,
+) {
 	return spawnSync(process.execPath, [HOOK], {
 		input: JSON.stringify({
 			session_id: "test",
-			cwd: repoRoot,
+			cwd,
 			permission_mode: "default",
 			hook_event_name: "PreToolUse",
 			tool_name: "Bash",
@@ -312,8 +331,8 @@ const ALLOW_CASES: string[] = [
 	"kill 12345",
 	"kill -9 12345",
 	// #3526: the acceptance list's own named exemptions. `.claude/worktrees/`
-	// is relative, resolved against repoRoot (this suite's own cwd), which is
-	// never under /tmp.
+	// is relative, resolved against `PAYLOAD_CWD` (this suite's own default
+	// cwd), which is never under /tmp.
 	"git worktree add .claude/worktrees/agent-3526-deadbeef",
 	"git worktree add ~/.cache/pi-lens-orchestrator/worktrees/agent-x",
 	"git worktree add ~/.local/share/pi-lens-orchestrator/tmp/lane-1",
@@ -389,23 +408,41 @@ function commandHash(command: string): string {
 // that exercise a guard rule. Keep this allowlist independent of findDeny so
 // a rule widening cannot silently turn a false positive into an expectation.
 //
-// #3471's `checkUngated` rule audited the same corpus (verbatim commands,
-// re-derived hashes in the PR body) and found 20 REAL historical instances
-// of the exact shape the issue describes: a check (`npm run
-// lint`/`build`/`test`, `npx vitest`, `node scripts/check-*.mjs`) piped to
-// `grep`/`tail`/`head` -- which replaces its exit status with the filter's,
-// almost always 0 -- and/or separated by `;`, with a `git commit`/`git push`
-// then running unconditionally (or gated on the WRONG, filter's, exit
-// status) rather than on the check's own result. Each one was read in full
-// before pinning; none is gated through shell control flow (that shape --
-// `vexit=$?; …; if [ $vexit -eq 0 ]; then git commit …; fi`, also present
-// in this corpus -- is excluded from the rule entirely, see
-// CONTROL_FLOW_WORDS in guard-bash.mjs, and contributes ZERO of these 20).
+// #3471's `checkUngated` rule audited the same corpus and found 20 REAL
+// historical instances of the exact shape the issue describes: a check
+// (`npm run lint`/`build`/`test`, `npx vitest`, `node scripts/check-*.mjs`)
+// piped to `grep`/`tail`/`head` -- which replaces its exit status with the
+// filter's, almost always 0 -- and/or separated by `;`, with a `git
+// commit`/`git push` then running unconditionally (or gated on the WRONG,
+// filter's, exit status) rather than on the check's own result. Each one
+// was read in full before pinning (the PR body quotes one representative
+// example, `ff582cb3…`, in full; the rest are read and reasoned about
+// individually, not re-quoted). None is gated through shell control flow
+// (that shape -- `vexit=$?; …; if [ $vexit -eq 0 ]; then git commit …; fi`,
+// also present in this corpus -- is excluded per-WRITE, not per-region, see
+// `writeIsInsideControlFlow` in guard-bash.mjs, and contributes ZERO of
+// these 20 checkUngated pins).
+//
+// #3526 review round 2 (F1, F3, F4) re-audited after three fixes and found
+// 17 more real instances, also read in full before pinning:
+//   - F1 (variable-indirected /tmp destinations, `S=/tmp/…; W=$S/wt; git
+//     worktree add $W` -- the ACTUAL shape of every historical /tmp
+//     worktree-add in this corpus, never a literal `$TMPDIR`): 9 new
+//     `tmpCheckout` denies.
+//   - F3 (the control-flow exemption moved from whole-region to per-write):
+//     1 new `checkUngated` deny (`e3cbc7a3…`) -- an EARLIER, already-closed
+//     `for…do…done` loop no longer exempts a LATER, genuinely ungated
+//     check -> write in the same region.
+//   - F4 (`vitest` recognized by basename, a bare `timeout <duration>`
+//     prefix stepped past, `npm test`/`npm t` added): 7 new `checkUngated`
+//     denies -- this repo's own `timeout N node_modules/.bin/vitest`/
+//     `timeout N npx vitest` convention, previously invisible to the check
+//     set entirely (the `timeout` word was an unrecognized command, not
+//     stripped).
 const EXPECTED_TRANSCRIPT_DENIES = new Set([
 	"21def4efd19e12fd4fcb3f0cfcbc7f000814ed54d6ecdb39701e74b08288811f",
 	"30b1b57e56ca162793f411ef91bc8e47607a91f420039b3e00451ecd5278ea02",
-	// #3471 checkUngated -- audited true positives (PR body has the full
-	// verbatim commands and the per-hash reasoning):
+	// #3471 checkUngated -- audited true positives, round 1 (20):
 	"ff582cb347e379fcf2dd2e965ea22a0313e76f18edad51ef7efc0cd01ad7b0ae",
 	"ada188d5f502c2c534e449a06b19aeef59e5d3f48e47f7061a1b8e65d1c55bce",
 	"a4f133cc3630108fcac7048f875b54e8920a2e01ba1f05426fbea6d4155d5582",
@@ -426,6 +463,28 @@ const EXPECTED_TRANSCRIPT_DENIES = new Set([
 	"247e48689008fc34af723b56eb1e1faea15683d8b77bdaddb8ed0967b3070ed8",
 	"a5aaebed4a33c5a63036aa4de421060ee3742097384404930ac7382dae1ef25a",
 	"b536e5e79822d8de332813a67673887436042c628b4751f25e8500fd0411cbff",
+	// #3526 review round 2, F1 -- variable-indirected /tmp worktree-adds (9):
+	"4162c428ba3cd3eb276a0980fd1a8d7444e6f55ef356a7c5ab5d4143e92aff49",
+	"06609131379d5d1b21c2f1a68b2346d4c9c63741a73d08c06ecf72f8e15aa423",
+	"e13eea5655fe6e57395def929222751b50359d41dffbee72d2b6e9c1d7150ae7",
+	"94a337509cf95b0daa738e00d023e78e2e9a4cd4e3e08c260ad07ac4c53bb112",
+	"8166b556313c947b48016bfc552c5a5cec196bd5bb5ce2f0f8890ed246307809",
+	"afdf482fd5cae451a226ebf0ebe721e433442fc86a5772b3bba56e823474e4fc",
+	"78b2ecd67afae2eabc3b4db24f3e8bb154f9d0ff23c2d598117834bfce33bcad",
+	"e0dd951d15e8ef944ae1a8b22ff6355567dd546c70a65e8e73d313dda91fffce",
+	"f5c05f910019f743bb94c7d086b5cc3e82371321624400e19831e2e7b6bafe42",
+	// #3526 review round 2, F3 -- an earlier CLOSED for/do/done loop no
+	// longer exempts a later genuinely ungated check -> write (1):
+	"e3cbc7a31b6837426817b794e54db318d3fef8fb766c023014336d7c1baae8e5",
+	// #3526 review round 2, F4 -- timeout-wrapped / basename-resolved
+	// vitest, previously invisible to the check set entirely (7):
+	"22441661595314c7a8207f7cb04bee63c81882c05e64e5325d7245ffcb3ec5d7",
+	"99384a2525ff8dddfee78c82c51af7021f01d6165005167033a717ffc56ea077",
+	"a6e2260e0c64ac20af126d1d7990830de94cce598da9bde0610262e75e3c905d",
+	"e849647d34e37aab0f927095172358192015259992a7202e98c09ee960b26a31",
+	"830516326aef8a7961d80c8b2ebcf53243a6c3408a2120f4bb6dcfc3386b3650",
+	"f8e25082d8aab77f62006719b1a214b65cb87af7faeb8d5baf12574d9480c366",
+	"cad4314ec40a34fb85ae43f865f96b5862397f363e26003cc814e87dfafceebf",
 ]);
 
 describe("scripts/hooks/guard-bash.mjs -- deny list (#2699)", () => {
@@ -1669,49 +1728,102 @@ describe("scripts/hooks/guard-bash.mjs -- unbounded nesting never throws (review
 // #3556 (2026-09-26): a fixer ran `pkill -f tlc2.TLC` to stop its own TLC
 // run; the pattern matches machine-wide, so it may have killed a concurrent
 // session's run too (load average ~30 at the time, a sibling TLC run failed
-// with AbortException). `runHook` always sets `cwd: repoRoot` (this
-// worktree's own absolute path), which doubles as the "worktree's absolute
-// path" the acceptance criterion's scoped form names.
+// with AbortException). `repoRoot` (this worktree's own real, linked
+// checkout on disk) doubles as the "worktree's absolute path" the
+// acceptance criterion's scoped form names, and is passed EXPLICITLY as
+// `cwd` below (never the default `PAYLOAD_CWD`, which is synthetic and not
+// a real linked worktree -- #3526/#3556 review F6 needs a REAL one for the
+// scoped-allow direction).
 describe("scripts/hooks/guard-bash.mjs -- pkill/killall shared-tool kill guard (#3556)", () => {
-	it("allows pkill -f scoped to this worktree's own absolute path", () => {
-		const result = runHook(`pkill -f ${repoRoot}.*tlc2`);
+	it("allows pkill -f scoped to this worktree's own absolute path, run FROM that worktree", () => {
+		const result = runHook(`pkill -f ${repoRoot}.*tlc2`, BASE_ENV, repoRoot);
 		expect(result.status).toBe(0);
 		expect(result.stderr).toBe("");
 	});
 
 	it("denies pkill -f scoped to a DIFFERENT worktree's path", () => {
-		const result = runHook("pkill -f /some/other/worktree.*tlc2");
+		const result = runHook(
+			"pkill -f /some/other/worktree.*tlc2",
+			BASE_ENV,
+			repoRoot,
+		);
 		expect(result.status).toBe(2);
 		expect(result.stderr.toLowerCase()).toContain("pkill");
 	});
 
 	it("still denies a bare (no -f) pkill even when the pattern text happens to contain the worktree path -- bare pkill matches by NAME only, never full command line", () => {
-		const result = runHook(`pkill ${repoRoot}`);
+		const result = runHook(`pkill ${repoRoot}`, BASE_ENV, repoRoot);
 		expect(result.status).toBe(2);
 	});
 
 	it("strips a runner prefix (sudo) before finding the -f pattern", () => {
-		const denied = runHook("sudo pkill -f tlc2.TLC");
+		const denied = runHook("sudo pkill -f tlc2.TLC", BASE_ENV, repoRoot);
 		expect(denied.status).toBe(2);
-		const allowed = runHook(`sudo pkill -f ${repoRoot}.*tlc2`);
+		const allowed = runHook(
+			`sudo pkill -f ${repoRoot}.*tlc2`,
+			BASE_ENV,
+			repoRoot,
+		);
 		expect(allowed.status).toBe(0);
 	});
 
 	it("a signal flag before -f does not defeat pattern parsing", () => {
-		const denied = runHook("pkill -9 -f tlc2.TLC");
+		const denied = runHook("pkill -9 -f tlc2.TLC", BASE_ENV, repoRoot);
 		expect(denied.status).toBe(2);
-		const allowed = runHook(`pkill -9 -f ${repoRoot}.*tlc2`);
+		const allowed = runHook(
+			`pkill -9 -f ${repoRoot}.*tlc2`,
+			BASE_ENV,
+			repoRoot,
+		);
 		expect(allowed.status).toBe(0);
 	});
 
 	it("killall is never scoped -- it matches by process NAME only, so no pattern text can allow it", () => {
-		const result = runHook(`killall -9 ${repoRoot}.*tlc2`);
+		const result = runHook(`killall -9 ${repoRoot}.*tlc2`, BASE_ENV, repoRoot);
 		expect(result.status).toBe(2);
 	});
 
 	it("kill <pid> is a different command entirely, unaffected by this rule", () => {
 		expect(findDeny("kill 12345")).toBeNull();
 		expect(findDeny(`kill ${repoRoot}`)).toBeNull();
+	});
+
+	// #3526/#3556 review F6: cwd alone is not enough. The orchestrator (and
+	// any subagent that has not entered a worktree) runs with payload cwd
+	// pointed at the SHARED main checkout, a path PREFIX of every
+	// `.claude/worktrees/*` path -- `pattern.includes(cwd)` was satisfiable
+	// from there even though it is not itself a linked worktree.
+	it("denies a scoped pkill -f run from a real directory that is NOT a linked worktree, even though the pattern contains that exact cwd", () => {
+		const notAWorktree = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-not-worktree-cwd-"),
+		);
+		try {
+			const result = runHook(
+				`pkill -f ${notAWorktree}.*tlc2`,
+				BASE_ENV,
+				notAWorktree,
+			);
+			expect(result.status).toBe(2);
+			expect(result.stderr.toLowerCase()).toContain("pkill");
+		} finally {
+			rmSync(notAWorktree, { recursive: true, force: true });
+		}
+	});
+
+	it("allows the SAME pattern once that cwd becomes a real linked worktree (only .git's shape changed)", () => {
+		const dir = mkdtempSync(
+			join(tmpdir(), "pi-lens-guard-bash-becomes-worktree-cwd-"),
+		);
+		try {
+			writeFileSync(
+				join(dir, ".git"),
+				"gitdir: /some/main/checkout/.git/worktrees/fixture\n",
+			);
+			const result = runHook(`pkill -f ${dir}.*tlc2`, BASE_ENV, dir);
+			expect(result.status).toBe(0);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -1727,7 +1839,8 @@ describe("scripts/hooks/guard-bash.mjs -- pkill/killall shared-tool kill guard (
 // PI_LENS_HOME for the same ambient-leakage reason the probe-hygiene section
 // above documents); every other case here is self-contained (an absolute
 // template, an explicit -p/--tmpdir=, or a RELATIVE template that measurably
-// lands in mktemp's own cwd -- always repoRoot in this suite, never /tmp).
+// lands in mktemp's own cwd -- `PAYLOAD_CWD` by default in this suite,
+// never /tmp).
 describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp (#3526)", () => {
 	const NO_AMBIENT_TMPDIR_ENV: NodeJS.ProcessEnv = Object.fromEntries(
 		Object.entries(BASE_ENV).filter(
@@ -1757,9 +1870,12 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 		expect(result.status).toBe(2);
 	});
 
-	it("allows a git worktree add whose destination resolves under this worktree's own cwd, not /tmp", () => {
+	it("allows a git worktree add whose destination resolves under a non-/tmp cwd", () => {
 		expect(
-			findDeny(`git worktree add ${repoRoot}/../agent-3526-new`, repoRoot),
+			findDeny(
+				`git worktree add ${PAYLOAD_CWD}/../agent-3526-new`,
+				PAYLOAD_CWD,
+			),
 		).toBeNull();
 	});
 
@@ -1785,7 +1901,7 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 		expect(
 			findDeny(
 				'TMPDIR=/home/dev/scratch git worktree add "$TMPDIR/foo"',
-				repoRoot,
+				PAYLOAD_CWD,
 			),
 		).toBeNull();
 	});
@@ -1799,6 +1915,130 @@ describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp 
 		expect(
 			findDeny("cat <<'EOF'\nmktemp -d /tmp/not-a-real-command\nEOF"),
 		).toBeNull();
+	});
+
+	// #3526 review F1: the historical incident shape, verbatim. All 14 real
+	// `/tmp` worktree-adds in the transcript corpus use variable indirection
+	// (`S=/tmp/…; W=$S/wt; git worktree add $W`), never a literal `$TMPDIR`.
+	describe("variable-indirected destinations (review F1)", () => {
+		it("resolves a one-hop indirected /tmp destination", () => {
+			expect(
+				findDeny(
+					"S=/tmp/claude-0/x/scratchpad; W=$S/wt; git worktree add -q --detach $W HEAD",
+					PAYLOAD_CWD,
+				),
+			).toBe("tmpCheckout");
+		});
+
+		it("resolves a two-hop indirected /tmp destination", () => {
+			expect(
+				findDeny("A=/tmp/x; B=$A/y; git worktree add $B", PAYLOAD_CWD),
+			).toBe("tmpCheckout");
+		});
+
+		it("keeps an indirected NON-/tmp destination allowed", () => {
+			expect(
+				findDeny('W=".claude/worktrees/a"; git worktree add "$W"', PAYLOAD_CWD),
+			).toBeNull();
+			expect(
+				findDeny(
+					"S=~/.local/share/pi-lens-orchestrator/tmp; W=$S/wt; git worktree add $W",
+					PAYLOAD_CWD,
+				),
+			).toBeNull();
+		});
+
+		it("does not hang on a self-referential chain, and stays allowed (the cap breaks the loop, leaving unresolved $A as literal text)", () => {
+			expect(findDeny("A=$A; git worktree add $A", PAYLOAD_CWD)).toBeNull();
+		});
+
+		it("resolves a chain up to the cap depth", () => {
+			expect(
+				findDeny(
+					"A=/home/x; B=$A/y; C=$B/z; D=$C/w; git worktree add $D",
+					PAYLOAD_CWD,
+				),
+			).toBeNull();
+		});
+
+		it("mktemp -p also resolves through indirection", () => {
+			expect(
+				findDeny("S=/tmp/scratch; mktemp -d -p $S foo.XXXXXX", PAYLOAD_CWD),
+			).toBe("tmpCheckout");
+		});
+	});
+
+	// #3526 review F2: bundled short mktemp flags and -t, measured against
+	// real GNU coreutils 9.4 (PR body has the transcript).
+	describe("bundled short mktemp flags and -t (review F2)", () => {
+		it("denies -d -t, -dt, -dp DIR, and -qd /tmp/X", () => {
+			expect(findDeny("mktemp -d -t rvprobe.XXXX", PAYLOAD_CWD)).toBe(
+				"tmpCheckout",
+			);
+			expect(findDeny("mktemp -dt rvprobe.XXXX", PAYLOAD_CWD)).toBe(
+				"tmpCheckout",
+			);
+			expect(findDeny("mktemp -dp /tmp rvprobe.XXXX", PAYLOAD_CWD)).toBe(
+				"tmpCheckout",
+			);
+			expect(findDeny("mktemp -qd /tmp/pi-lens-review-XXXX", PAYLOAD_CWD)).toBe(
+				"tmpCheckout",
+			);
+		});
+
+		it("allows the same bundled forms when -p/-t root off /tmp", () => {
+			expect(
+				findDeny("mktemp -dp /home/dev/scratch rvprobe.XXXX", PAYLOAD_CWD),
+			).toBeNull();
+			expect(
+				findDeny(
+					"TMPDIR=/home/dev/scratch mktemp -dt rvprobe.XXXX",
+					PAYLOAD_CWD,
+				),
+			).toBeNull();
+		});
+
+		it("a bundled flag with no 'd' letter stays file mode (always allowed)", () => {
+			expect(findDeny("mktemp -qt rvprobe.XXXX", PAYLOAD_CWD)).toBeNull();
+		});
+	});
+
+	// #3526 review S1: bash resolves `~` before the program ever sees argv;
+	// this static scanner has to redo that step, and must do it regardless
+	// of where the payload cwd happens to be (a reviewer's own worktree may
+	// itself sit under /tmp).
+	describe("~ (HOME) expansion (review S1)", () => {
+		it("expands ~/… to a real HOME even when cwd is itself under /tmp", () => {
+			const underTmpCwd = "/tmp/some-review-worktree";
+			expect(
+				findDeny(
+					"git worktree add ~/.cache/pi-lens-orchestrator/worktrees/agent-x",
+					underTmpCwd,
+				),
+			).toBeNull();
+			expect(
+				findDeny(
+					"git worktree add ~/.local/share/pi-lens-orchestrator/tmp/lane-1",
+					underTmpCwd,
+				),
+			).toBeNull();
+			expect(
+				findDeny("git worktree add ~/.plegma/work/sub-1", underTmpCwd),
+			).toBeNull();
+		});
+
+		it("expands ~ picked up MID-CHAIN through variable indirection", () => {
+			expect(
+				findDeny(
+					"S=~/.local/share/pi-lens-orchestrator/tmp; W=$S/wt; git worktree add $W",
+					"/tmp/some-review-worktree",
+				),
+			).toBeNull();
+		});
+
+		it("bare ~ alone expands too", () => {
+			expect(findDeny("git worktree add ~", PAYLOAD_CWD)).toBeNull();
+		});
 	});
 });
 
@@ -1828,6 +2068,51 @@ describe("scripts/hooks/guard-bash.mjs -- git commit/push chained after an ungat
 
 	it("a DIFFERENT node script is not a check", () => {
 		expect(findDeny("node scripts/build.mjs ; git commit -m x")).toBeNull();
+	});
+
+	// #3471 review F4: `npx vitest` alone missed this repo's own convention.
+	describe("vitest by basename, a timeout prefix, and npm test (review F4)", () => {
+		it("node_modules/.bin/vitest is a check, resolved by basename", () => {
+			expect(
+				findDeny(
+					"node_modules/.bin/vitest run t.test.ts 2>&1 | grep x; git commit -m x",
+				),
+			).toBe("checkUngated");
+			expect(
+				findDeny("node_modules/.bin/vitest run t.test.ts && git commit -m x"),
+			).toBeNull();
+		});
+
+		it("a bare timeout <duration> prefix is stepped past", () => {
+			expect(
+				findDeny(
+					"timeout 400 node_modules/.bin/vitest run t.test.ts 2>&1 | grep x; git add -A && git commit -m x && git push origin y",
+				),
+			).toBe("checkUngated");
+			expect(
+				findDeny(
+					"timeout 400 node_modules/.bin/vitest run t.test.ts && git add -A && git commit -m x && git push origin y",
+				),
+			).toBeNull();
+		});
+
+		it("npm test and npm t are checks", () => {
+			expect(findDeny("npm test 2>&1 | tail; git commit -m x")).toBe(
+				"checkUngated",
+			);
+			expect(findDeny("npm test && git commit -m x")).toBeNull();
+			expect(findDeny("npm t 2>&1 | tail; git commit -m x")).toBe(
+				"checkUngated",
+			);
+		});
+
+		it("a timeout-wrapped, unrelated binary is still not a check", () => {
+			expect(
+				findDeny(
+					"timeout 30 node_modules/.bin/oxfmt --check x.ts ; git commit -m x",
+				),
+			).toBeNull();
+		});
 	});
 
 	it("no preceding check at all allows -- this is not a general 'write must be && or terminal' rule (it would deny the repo's own sanctioned `commit; status` pattern)", () => {
@@ -1873,6 +2158,53 @@ describe("scripts/hooks/guard-bash.mjs -- git commit/push chained after an ungat
 			{ text: " f", sep: "&" },
 			{ text: "g", sep: "\n" },
 		]);
+	});
+
+	// #3471 review F3: the control-flow exemption moved from whole-REGION to
+	// per-WRITE (a backward walk that stops at the nearest opener or closer),
+	// because a region can carry an EARLIER, already-closed construct beside
+	// a LATER, genuinely ungated check -> write the old whole-region skip
+	// could not tell apart. Real corpus row e3cbc7a3 is this shape.
+	describe("per-write control-flow scoping (review F3)", () => {
+		it("an earlier, closed for/do/done loop does not exempt a later ungated write (corpus e3cbc7a3)", () => {
+			expect(
+				findDeny(
+					"for f in a; do :; done; npx vitest run tests/config/hook-await-bounds.test.ts 2>&1 | grep -E 'Tests |Test Files'; git add x && git commit -m y && git push z",
+				),
+			).toBe("checkUngated");
+		});
+
+		it("a trivial if/fi with nothing inside still denies the write after it", () => {
+			expect(
+				findDeny(
+					"npm run lint 2>&1 | tail; if true; then :; fi; git push origin y",
+				),
+			).toBe("checkUngated");
+		});
+
+		it("a trivial for/do/done with nothing inside still denies the write after it", () => {
+			expect(
+				findDeny(
+					"npm run lint 2>&1 | tail; for f in a; do :; done; git push origin y",
+				),
+			).toBe("checkUngated");
+		});
+
+		it("the vexit convention still allows -- the write's nearest control-flow word is an opener (then), not a closer", () => {
+			expect(
+				findDeny(
+					"npm run build; vexit=$?; if [ $vexit -eq 0 ]; then git add -A && git commit -m x; fi",
+				),
+			).toBeNull();
+		});
+
+		it("a while/do/done convention also still allows", () => {
+			expect(
+				findDeny(
+					"npm run build; vexit=$?; while [ $vexit -eq 0 ]; do git add -A && git commit -m x; break; done",
+				),
+			).toBeNull();
+		});
 	});
 });
 

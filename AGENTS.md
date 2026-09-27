@@ -960,6 +960,10 @@ see "Paths, data, and operating systems" for where those belong); and no
 lint`/`build`/`test`/`fmt:check`/`preflight`, `npx vitest`, `tsc`, `node
 scripts/check-*.mjs`) through `;` or a pipe rather than `&&` -- the check's
 exit code gates nothing that way (#3471; gate with `&&`, or read the
-check's result in its own call). See `CONTRIBUTING.md` "Local git hooks"
-for the human-facing version and `docs/pi-lens-subagent.md` for the fuller
-worktree/probe-hygiene contract.
+check's result in its own call). Concretely: `npm run build >log 2>&1;
+echo build=$?; test "$(git rev-parse HEAD)" = SHA && git push …` is denied
+(the build's real exit code is thrown away by `;`); rewrite it as `npm run
+build >log 2>&1 && test "$(git rev-parse HEAD)" = SHA && git push …`, or
+split the build and the push into two calls. See `CONTRIBUTING.md` "Local
+git hooks" for the human-facing version and `docs/pi-lens-subagent.md` for
+the fuller worktree/probe-hygiene contract.
