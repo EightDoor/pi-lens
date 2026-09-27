@@ -9,7 +9,11 @@ import {
 	stableFindingId,
 } from "./finding-identity.js";
 import type { LSPCodeAction, LSPDiagnostic } from "./lsp/client.js";
-import { applyWorkspaceEdit } from "./lsp/edits.js";
+import {
+	applyWorkspaceEdit,
+	StaleWorkspaceEditContentError,
+	workspaceEditDiskPaths,
+} from "./lsp/edits.js";
 import { getLSPService } from "./lsp/index.js";
 import { isUnderDir, normalizeMapKey } from "./path-utils.js";
 import {
@@ -2120,22 +2124,56 @@ export async function applyConservativeActionableWarningFixes(args: {
 					continue;
 				}
 				const edit = selected.edit as Parameters<typeof applyWorkspaceEdit>[0];
-				const applied = await applyWorkspaceEdit(
-					edit,
-					args.cwd,
-					args.mutationContext
+				// #3541: the expected content below is compared only where a text
+				// edit first reads a file. A resource operation (create, rename,
+				// delete) is never compared, even on this file, so a conservative
+				// fix is text-only.
+				if (
+					edit.documentChanges?.some(
+						(change) =>
+							typeof change === "object" && change !== null && "kind" in change,
+					)
+				) {
+					summary.skipped.push({
+						id: warning.id,
+						reason: "resource_operation",
+					});
+					continue;
+				}
+				// #3541: and it covers only the file this fix read; an edit that
+				// also writes another file would apply there at the server's
+				// positions unchecked. A path not on disk throws here, and the fix
+				// is skipped as apply_failed.
+				const target = fs.realpathSync.native(warning.filePath);
+				const writesOtherFile = workspaceEditDiskPaths(edit).some(
+					(diskPath) => fs.realpathSync.native(diskPath) !== target,
+				);
+				if (writesOtherFile) {
+					summary.skipped.push({ id: warning.id, reason: "multi_file_edit" });
+					continue;
+				}
+				const applied = await applyWorkspaceEdit(edit, args.cwd, {
+					// #3541: the code action's positions are the server's view of
+					// `content`; inside pi's queue the edit applies only to it. A
+					// file absent at that read (`content` undefined) expected no bytes.
+					expectedContent: new Map([[target, content ?? ""]]),
+					...(args.mutationContext
 						? {
 								mutationContext: {
 									...args.mutationContext,
 									emitSummary: false,
 								},
 							}
-						: undefined,
-				);
+						: {}),
+				});
 				appliedResults.push(applied);
 				for (const changedFile of applied.files) changedFiles.add(changedFile);
 				summary.applied++;
 			} catch (err) {
+				if (err instanceof StaleWorkspaceEditContentError) {
+					summary.skipped.push({ id: warning.id, reason: "stale_content" });
+					continue;
+				}
 				failedCount++;
 				const partial = (
 					err as {

@@ -24,9 +24,11 @@
  * session manager (`noteHostSessionManager`) and records the outcome either
  * way.
  */
+import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { recordDegradationOnce } from "./degradation-ledger.js";
 import { logExtension } from "./extension-log.js";
+import { compareOrdinal } from "./string-utils.js";
 
 type FileMutationQueue = <T>(
 	filePath: string,
@@ -121,18 +123,48 @@ export function withHostFileMutationQueue<T>(
 }
 
 /**
+ * #3541: `withHostFileMutationQueue` for a writer of several files. It enters
+ * one queue at a time, in one order of the keys, so two such writers never
+ * each hold a path the other waits for. A path is keyed the way pi keys its
+ * queue (its realpath, or the resolved spelling of a missing path:
+ * `@earendil-works/pi-coding-agent` `dist/core/tools/file-mutation-queue.js`
+ * `getMutationQueueKey`), so two spellings of one file enter its queue once;
+ * the queue is not reentrant, and a second entry would wait on the first.
+ */
+export async function withHostFileMutationQueues<T>(
+	filePaths: readonly string[],
+	fn: () => Promise<T>,
+): Promise<T> {
+	const keys = await Promise.all(
+		filePaths.map((filePath) => {
+			const resolvedPath = resolve(filePath);
+			return realpath(resolvedPath).catch(() => resolvedPath);
+		}),
+	);
+	return [...new Set(keys)]
+		.sort(compareOrdinal)
+		.reduceRight<() => Promise<T>>(
+			(inner, key) => () => withHostFileMutationQueue(key, inner),
+			fn,
+		)();
+}
+
+/**
  * A hold on the queue that a pipeline takes at its first write and keeps
  * through its own after-reads, or undefined outside the pi host adapter, so a
  * writer there never yields for a queue that does not exist (the drain's
  * worker order depends on it): `acquire` resolves once the queue is entered
  * (idempotent), `release` lets the next queued mutation run (idempotent, and a
- * no-op when nothing was acquired). `outlive` hands the hold a writer that a
- * bound gave up on while its child process runs on: `release` then waits for
- * it to settle, so the child cannot write over an edit queued behind the hold.
+ * no-op when nothing was acquired). `enter` is `acquire` for a writer that may
+ * outlive a bound (#3558): it enters at the writer's own write, after its
+ * command resolution, so an install never holds pi's edits back. Before
+ * `release`, the writer joins the hold and `release` waits for it to settle,
+ * so its child cannot write over an edit queued behind the hold; after it, the
+ * writer takes a queue entry of its own until it settles.
  */
 export interface FileMutationHold {
 	acquire(): Promise<void>;
-	outlive(writer: Promise<unknown>): void;
+	enter(writer: Promise<unknown>): Promise<void>;
 	release(): void;
 }
 
@@ -142,24 +174,36 @@ export function holdFileMutationQueue(
 	if (!loadHostSdk) return undefined;
 	let entered: Promise<void> | undefined;
 	let releaseHeld: () => void = () => {};
+	let released = false;
 	const outliving: Promise<unknown>[] = [];
+	const acquire = () => {
+		entered ??= new Promise<void>((resolveEntered, rejectEntered) => {
+			const held = new Promise<void>((resolveHeld) => {
+				releaseHeld = resolveHeld;
+			});
+			withHostFileMutationQueue(filePath, () => {
+				resolveEntered();
+				return held;
+			}).catch(rejectEntered);
+		});
+		return entered;
+	};
 	return {
-		acquire() {
-			entered ??= new Promise<void>((resolveEntered, rejectEntered) => {
-				const held = new Promise<void>((resolveHeld) => {
-					releaseHeld = resolveHeld;
-				});
+		acquire,
+		enter(writer) {
+			if (!released) {
+				outliving.push(writer);
+				return acquire();
+			}
+			return new Promise<void>((resolveEntered, rejectEntered) => {
 				withHostFileMutationQueue(filePath, () => {
 					resolveEntered();
-					return held;
+					return writer;
 				}).catch(rejectEntered);
 			});
-			return entered;
-		},
-		outlive(writer) {
-			outliving.push(writer);
 		},
 		release() {
+			released = true;
 			void Promise.allSettled(outliving).then(() => releaseHeld());
 		},
 	};
