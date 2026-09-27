@@ -250,7 +250,7 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await expectSessionTwoRegistersAlone();
 	});
 
-	it("removes a secondary root when its removal lands while this process's own heartbeat holds the lock (#3587)", async () => {
+	it("removes a secondary root when its removal lands while this process's own heartbeat holds the lock", async () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstanceRoot(ROOT_SECONDARY);
 		await rootRemovalDuringHeartbeat(ROOT_SECONDARY);
@@ -347,7 +347,7 @@ describe("instance registry across a session replacement (#3498)", () => {
 		await expectSessionTwoRegistersAlone();
 	}, 15_000);
 
-	it("removes a secondary root after a peer holds the lock past the sync wait and one async wait (#3587)", async () => {
+	it("removes a secondary root after a peer holds the lock past the sync wait and one async wait", async () => {
 		await registry.registerInstance(ROOT_A);
 		await registry.registerInstanceRoot(ROOT_SECONDARY);
 		// Same shape as the whole-entry case above: the peer's lock ages out of
