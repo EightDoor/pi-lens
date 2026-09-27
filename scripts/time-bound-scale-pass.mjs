@@ -49,12 +49,41 @@ export const CANARY =
 /**
  * Known flips, keyed like `verdicts` keys, each with a reason that names the
  * issue tracking it. A flip admitted here is sensitive to the bound's VALUE
- * but not to host speed, so pinning it would hide what it asserts.
+ * but not to host speed, so pinning it would hide what it asserts. Two-part,
+ * like the flake-shape ratchet (AGENTS.md shape 38): the admitted file must
+ * also carry an `ADMISSION_HEADER` line saying why, so a data edit here alone
+ * admits nothing.
  */
 export const ADMITTED = Object.freeze({
 	"tests/clients/observed-mutation-net.test.ts > #2449 review round 2 — the settle is not budget-gated > completes for EVERY watched entry with the per-turn budget already spent":
 		"#3496: its clock is a 2 ms-per-read Date.now stub, so the settle deadline is spent on stub ticks, not host time, and a loaded runner cannot move it; it asserts the real 50 ms deadline against a 1 ms clamp, so a 0.2x scale flipping it is the case working",
 });
+
+export const ADMISSION_HEADER = /\/\/ time-bound-scale: (.*)$/m;
+
+const MIN_REASON = 15;
+
+/**
+ * Problems with the admissions themselves: a reason that names no issue, or an
+ * admitted file with no header of at least `MIN_REASON` characters.
+ * `readSource` returns a repo-relative file's text, or undefined. The live
+ * table is audited by `tests/scripts/time-bound-scale-pass.test.ts` in the
+ * gating Unit lane, not by this advisory pass.
+ */
+export function admissionProblems(admitted, readSource) {
+	const problems = [];
+	for (const [key, reason] of Object.entries(admitted)) {
+		if (!/#\d+/.test(reason))
+			problems.push(`${key}: admission reason names no issue (#NNN)`);
+		const file = key.split(" > ")[0];
+		const header = ADMISSION_HEADER.exec(readSource(file) ?? "")?.[1].trim();
+		if (!header || header.length < MIN_REASON)
+			problems.push(
+				`${key}: ${file} carries no "// time-bound-scale: <reason>" header; an admission is two-part (AGENTS.md shape 38)`,
+			);
+	}
+	return problems;
+}
 
 /**
  * The suites that reach the scaled bounds: every test file that imports the

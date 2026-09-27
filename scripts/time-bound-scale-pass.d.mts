@@ -2,6 +2,11 @@ export declare const TIME_BOUNDS: readonly string[];
 export declare const DEFAULT_SCALE: number;
 export declare const CANARY: string;
 export declare const ADMITTED: Readonly<Record<string, string>>;
+export declare const ADMISSION_HEADER: RegExp;
+export declare function admissionProblems(
+	admitted: Readonly<Record<string, string>>,
+	readSource: (file: string) => string | undefined,
+): string[];
 export type Verdict = "passed" | "failed";
 export interface PassFlip {
 	key: string;

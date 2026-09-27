@@ -50,4 +50,4 @@ jobs:
       - name: Build
         run: npm run build
       - name: Run the pass
-        run: node scripts/time-bound-scale-pass.mjs
+        run: npm run test:time-bound-scale

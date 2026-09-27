@@ -5,6 +5,7 @@
  * a double that returns canned stats would prove nothing about whether the diff
  * can see a write (test-authoring screen "ambient-inspection double").
  */
+// time-bound-scale: "completes for EVERY watched entry with the per-turn budget already spent" runs its settle on a 2 ms-per-read Date.now stub, so a loaded host cannot move it, and it flips under a scaled settle bound by design (#3496).
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";

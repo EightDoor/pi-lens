@@ -7,11 +7,13 @@
  * run it could not judge as clean, and cannot go vacuous (a canary that stays
  * green, an admission that no longer flips).
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	ADMITTED,
+	admissionProblems,
 	CANARY,
 	comparePassRuns,
 	passExitCode,
@@ -193,5 +195,34 @@ describe("#3496 time-bound scale pass", () => {
 		// pass would red on it forever rather than on the thing it names.
 		for (const key of [CANARY, ...Object.keys(ADMITTED)])
 			expect(population, key).toContain(key.split(" > ")[0]);
+	});
+
+	it("admits only with a reason naming an issue AND a header in the admitted file", () => {
+		// AGENTS.md shape 38: a data edit to ADMITTED alone must admit nothing.
+		const key = "tests/a.test.ts > suite > sensitive";
+		const header =
+			"// time-bound-scale: its clock is stubbed, so load cannot move it\n";
+		expect(
+			admissionProblems({ [key]: "#3496: stub clock" }, () => header),
+		).toEqual([]);
+		expect(admissionProblems({ [key]: "stub clock" }, () => header)).toEqual([
+			`${key}: admission reason names no issue (#NNN)`,
+		]);
+		const noHeader = `${key}: tests/a.test.ts carries no "// time-bound-scale: <reason>" header; an admission is two-part (AGENTS.md shape 38)`;
+		expect(
+			admissionProblems({ [key]: "#3496: stub clock" }, () => "it()\n"),
+		).toEqual([noHeader]);
+		expect(
+			admissionProblems(
+				{ [key]: "#3496: stub clock" },
+				() => "// time-bound-scale: short\n",
+			),
+		).toEqual([noHeader]);
+		// The live table, against the live tree.
+		expect(
+			admissionProblems(ADMITTED, (file) =>
+				fs.readFileSync(path.join(REPO_ROOT, file), "utf8"),
+			),
+		).toEqual([]);
 	});
 });
