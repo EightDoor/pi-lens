@@ -584,10 +584,28 @@ export interface HeartbeatPatch {
 }
 
 /** Update this process's heartbeat/rss (and, since #620, host CPU% + live
- *  LSP children's rss/CPU%). Cheap — safe to call every turn end. */
+ *  LSP children's rss/CPU%). Cheap — safe to call every turn end.
+ *
+ * #3602: runs on the SAME tail as `registerInstance`/`registerInstanceRoot`/
+ * `deregisterInstance` (`queueRegistryMutation`) rather than taking the
+ * registry lock directly. Before this, a heartbeat queued behind a
+ * still-in-flight `registerInstance` (session_start's `void
+ * registerInstance(...)`, not awaited) could win the race to the lock: it
+ * would read the registry before that registration's write landed, find no
+ * own entry, and — because `registerInstanceNow` had already set the
+ * repair-intent root via `rememberRegistrationRoot` BEFORE its write — record
+ * a spurious `instance-registry-registration-missing` on an ordinary first
+ * turn and queue a redundant re-register. Sharing the tail makes the two
+ * mutations' submission order (session_start's registration, then
+ * turn_end's/agent_settled's heartbeat) their EXECUTION order too, so a
+ * heartbeat can never observe that half-registered state again. */
 export async function updateHeartbeat(
 	patch: HeartbeatPatch = {},
 ): Promise<void> {
+	return queueRegistryMutation(() => updateHeartbeatNow(patch));
+}
+
+async function updateHeartbeatNow(patch: HeartbeatPatch): Promise<void> {
 	if (!isInstanceRegistryEnabled()) return;
 	const pid = process.pid;
 	const selfStart = await ownProcessStart(startReadOptions());
