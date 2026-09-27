@@ -67,6 +67,77 @@ function releaseLegacyLock(lock: string): void {
 }
 
 /**
+ * #3518 G16 residual 2: generations this process currently holds, so a
+ * process that exits (even via a forceful `process.exit()`, which abandons
+ * pending promises/timers without running their `finally` blocks) can still
+ * release them. Node's "exit" listeners are synchronous — they cannot await
+ * `release`'s async siblings — so this is the sync generation release only.
+ * Not a correctness fix: `pidFileIsStale` already judges a dead owner's
+ * generation stale on sight, so the next acquirer takes it over cleanly
+ * (`instance-registry-lock-stale-takeover`). It saves every later acquirer
+ * that avoidable takeover and degradation row for a hold this same process
+ * could have released on its way out.
+ *
+ * Kept on `globalThis` via `Symbol.for`, not plain module state (mirrors
+ * `clients/ndjson-logger.ts`'s shared exit handler, same reason): Vitest
+ * re-evaluates this module after `vi.resetModules()`, and pi can load the
+ * source and compiled entry through separate module graphs. A module-local
+ * guard would register one "exit" listener per graph and reproduce Node's
+ * MaxListeners warning; a process-wide flag registers exactly one.
+ */
+interface OpenHoldsGlobalState {
+	holds: Set<GenerationHold>;
+	exitReleaseRegistered: boolean;
+}
+
+const OPEN_HOLDS_GLOBAL_KEY = Symbol.for(
+	"pi-lens.instance-registry-lock.open-holds",
+);
+const openHoldsGlobalHost = globalThis as typeof globalThis & {
+	[key: symbol]: unknown;
+};
+
+function isOpenHoldsState(value: unknown): value is OpenHoldsGlobalState {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<OpenHoldsGlobalState>;
+	return (
+		candidate.holds instanceof Set &&
+		typeof candidate.exitReleaseRegistered === "boolean"
+	);
+}
+
+const existingOpenHoldsState = openHoldsGlobalHost[OPEN_HOLDS_GLOBAL_KEY];
+const openHoldsState: OpenHoldsGlobalState = isOpenHoldsState(
+	existingOpenHoldsState,
+)
+	? existingOpenHoldsState
+	: (openHoldsGlobalHost[OPEN_HOLDS_GLOBAL_KEY] = {
+			holds: new Set<GenerationHold>(),
+			exitReleaseRegistered: false,
+		});
+
+function releaseOpenHoldsBestEffort(): void {
+	for (const hold of openHoldsState.holds) {
+		try {
+			releaseGeneration(hold);
+		} catch {
+			// Best-effort, same as releaseGeneration's own swallow.
+		}
+	}
+}
+
+function registerExitRelease(): void {
+	if (openHoldsState.exitReleaseRegistered) return;
+	openHoldsState.exitReleaseRegistered = true;
+	process.on("exit", releaseOpenHoldsBestEffort);
+}
+
+/** Test-only: run the exit-time release directly, without emitting "exit". */
+export function _releaseOpenHoldsForTests(): void {
+	releaseOpenHoldsBestEffort();
+}
+
+/**
  * One attempt: the hold, "busy" (retry after a backoff), or "failed" (a
  * filesystem error other than contention, recorded; the caller gives up).
  * Never throws: a throw would reach session shutdown's deregisterInstance().
@@ -77,7 +148,11 @@ function tryAcquire(target: string): GenerationHold | "busy" | "failed" {
 		hold = tryAcquireGeneration(generationDir(target), LOCK_STALE_MS);
 		if (!hold) return "busy";
 		if (hold.tookOverStale) recordStaleTakeover(target, hold);
-		if (takeLegacyLock(legacyLockPath(target))) return hold;
+		if (takeLegacyLock(legacyLockPath(target))) {
+			openHoldsState.holds.add(hold);
+			registerExitRelease();
+			return hold;
+		}
 		recordLegacyHeld(target);
 		releaseGeneration(hold);
 		return "busy";
@@ -89,6 +164,7 @@ function tryAcquire(target: string): GenerationHold | "busy" | "failed" {
 }
 
 function release(target: string, hold: GenerationHold): void {
+	openHoldsState.holds.delete(hold);
 	releaseLegacyLock(legacyLockPath(target));
 	releaseGeneration(hold);
 }

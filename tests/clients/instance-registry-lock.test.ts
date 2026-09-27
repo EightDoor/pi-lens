@@ -7,6 +7,7 @@ import { syncBuiltinESMExports } from "node:module";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	_releaseOpenHoldsForTests,
 	withInstanceRegistryLock,
 	withInstanceRegistryLockSync,
 } from "../../clients/instance-registry-lock.js";
@@ -542,6 +543,68 @@ describe("instance registry lock", () => {
 			}),
 		).toBe("blocked");
 		expect(fs.readFileSync(marker, "utf8")).toBe("sync body reached\n");
+	});
+});
+
+describe("exit-time generation release (#3518 G16 residual 2)", () => {
+	function tempTarget(): { target: string; gens: string } {
+		const dir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-registry-lock-exit-"),
+		);
+		dirs.push(dir);
+		const target = path.join(dir, "instances.json");
+		return { target, gens: `${target}.locks` };
+	}
+
+	// #3518 G16 residual 2: `tests/index-wiring.test.ts` run whole-file left
+	// the shared `.probe-home` registry lock's top generation held by the
+	// vitest fork worker's own dead pid — a still-pending fire-and-forget
+	// registry mutation (session_start's `void registerInstance(...)`,
+	// turn_end's `void updateHeartbeat()`, or agent_settled's quiet-window
+	// heartbeat) had taken the lock but not yet reached its own `finally`
+	// release when the worker process exited. `process.exit()` abandons
+	// pending promises without running their `finally` blocks, so nothing
+	// short of a synchronous process "exit" listener can catch this.
+	it("releases a currently-held generation before the caller's own release runs, as a process exit listener would", () => {
+		const { target, gens } = tempTarget();
+		let releasedWhileStillHeld: boolean | undefined;
+		expect(
+			withInstanceRegistryLockSync(target, () => {
+				// What the registered "exit" listener calls. A real process exit
+				// would skip everything after this point (including the `finally`
+				// below) — calling it here directly, mid-hold, proves the
+				// generation is released BEFORE that finally ever runs.
+				_releaseOpenHoldsForTests();
+				releasedWhileStillHeld = fs.existsSync(
+					path.join(gens, "lock.1.released"),
+				);
+				return "entered";
+			}),
+		).toBe("entered");
+		expect(releasedWhileStillHeld).toBe(true);
+	});
+
+	it("registers at most one process 'exit' listener across repeated acquisitions", () => {
+		const { target } = tempTarget();
+		withInstanceRegistryLockSync(target, () => "a");
+		const count = process.listenerCount("exit");
+		withInstanceRegistryLockSync(target, () => "b");
+		withInstanceRegistryLockSync(target, () => "c");
+		expect(process.listenerCount("exit")).toBe(count);
+	});
+
+	it("does not re-release a generation this process already released normally", () => {
+		const { target, gens } = tempTarget();
+		expect(withInstanceRegistryLockSync(target, () => "entered")).toBe(
+			"entered",
+		);
+		const releasedAt = fs.statSync(path.join(gens, "lock.1.released")).mtimeMs;
+		// The held-set no longer includes this generation once `release()` ran
+		// normally, so a later exit-listener call is a no-op for it.
+		_releaseOpenHoldsForTests();
+		expect(fs.statSync(path.join(gens, "lock.1.released")).mtimeMs).toBe(
+			releasedAt,
+		);
 	});
 });
 
