@@ -181,6 +181,16 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 		expect(kindCount("wasm-trap")).toBe(1);
 	});
 
+	it("counts a trap thrown as a bare string without throwing", async () => {
+		// A primitive cannot be remembered for dedupe; reporting it must still
+		// be total, or the report itself escapes the caller's catch.
+		const { client } = await liveClient();
+
+		expect(client.reportWasmAbort("memory access out of bounds")).toBe(false);
+
+		expect(kindCount("wasm-trap")).toBe(1);
+	});
+
 	it("keeps the budget across a session reset", async () => {
 		// The heap outlives the session, so a session boundary must not re-arm
 		// the budget: that would make the bound unbounded across sessions.
