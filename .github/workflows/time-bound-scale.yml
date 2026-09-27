@@ -31,8 +31,9 @@ jobs:
   pass:
     name: Time-bound scale pass (advisory)
     runs-on: ubuntu-latest
-    # The pass is three runs of nine files; locally 48 s in all. The cap bounds
-    # a hang against GitHub's 360-minute default with room for a cold install.
+    # The pass is five runs of nine files (unscaled, then one per bound). The
+    # cap bounds a hang against GitHub's 360-minute default with room for a
+    # cold install.
     timeout-minutes: 20
     continue-on-error: true
     steps:

@@ -158,26 +158,33 @@ export const OBSERVED_TURN_BUDGET_MS = 600;
 const OBSERVED_SETTLE_DEADLINE_MS = 50;
 
 /**
- * Test-only overrides of the two wall-clock bounds a directory observation
- * passes through (the arm's capture timeout and the settle's per-entry
- * deadline). A test that asserts on WHAT an observation saw — not on how fast
- * the machine is — widens them, and restores them with `{}` when it finishes.
+ * Test-only overrides of the wall-clock bounds an observation passes through
+ * (the arm's capture timeout, the settle's per-entry deadline, and the settled
+ * sweep's window deadline). A test that asserts on WHAT an observation saw —
+ * not on how fast the machine is — widens them, and restores them with `{}`
+ * when it finishes.
  */
 let captureBudgetOverrideMs: number | undefined;
 let settleDeadlineOverrideMs: number | undefined;
+let sweepDeadlineOverrideMs: number | undefined;
 
 /**
- * #3496: the load-simulation seam for the two bounds above. On a loaded runner
- * the settle deadline cut a directory target's 33rd entry and a test's verdict
- * flipped with no timer in its source (#3493). `PI_LENS_TEST_TIME_BOUND_SCALE`
- * multiplies a bound, so `scripts/time-bound-scale-pass.mjs` can shrink it
- * and list the tests that flip; `PI_LENS_TEST_TIME_BOUND`, when set, names the
- * one bound it applies to, so each flip is attributed to its bound. With the
- * scale unset the production constant is returned unchanged. The override
- * above wins at both call sites: a test that pinned its bounds is exactly the
- * test the scale must not move.
+ * #3496: the load-simulation seam for every wall-clock bound in this module
+ * that gates an outcome: the three above, and the per-turn budget. On a loaded
+ * runner the settle deadline cut a directory target's 33rd entry and a test's
+ * verdict flipped with no timer in its source (#3493).
+ * `PI_LENS_TEST_TIME_BOUND_SCALE` multiplies a bound, so
+ * `scripts/time-bound-scale-pass.mjs` can shrink it and list the tests that
+ * flip; `PI_LENS_TEST_TIME_BOUND`, when set, names the one bound it applies
+ * to, so each flip is attributed to its bound. With the scale unset the
+ * production constant is returned unchanged. An override above wins where one
+ * exists: a test that pinned its bounds is exactly the test the scale must not
+ * move.
  */
-function scaledBoundMs(bound: "capture" | "settle", ms: number): number {
+function scaledBoundMs(
+	bound: "capture" | "settle" | "sweep" | "turn",
+	ms: number,
+): number {
 	const scale = Number(process.env.PI_LENS_TEST_TIME_BOUND_SCALE);
 	if (!(scale > 0)) return ms;
 	const only = process.env.PI_LENS_TEST_TIME_BOUND;
@@ -381,13 +388,15 @@ export function resetObservedMutationNet(): void {
 	current.sweepCursor = 0;
 }
 
-/** Test seam: widen the arm/settle time bounds; see the overrides' doc. */
+/** Test seam: widen the arm/settle/sweep time bounds; see the overrides' doc. */
 export function _setObservedTimeBoundsForTests(bounds: {
 	captureMs?: number;
 	settleMs?: number;
+	sweepMs?: number;
 }): void {
 	captureBudgetOverrideMs = bounds.captureMs;
 	settleDeadlineOverrideMs = bounds.settleMs;
+	sweepDeadlineOverrideMs = bounds.sweepMs;
 }
 
 /** Test seam: the net's live state, as plain data. */
@@ -475,7 +484,10 @@ function remainingTurnBudgetMs(turnIndex: number): number {
 		current.turnIndex = turnIndex;
 		current.turnSpentMs = 0;
 	}
-	return Math.max(0, OBSERVED_TURN_BUDGET_MS - current.turnSpentMs);
+	return Math.max(
+		0,
+		scaledBoundMs("turn", OBSERVED_TURN_BUDGET_MS) - current.turnSpentMs,
+	);
 }
 
 function chargeTurnBudget(turnIndex: number, spentMs: number): void {
@@ -1500,15 +1512,18 @@ export async function runObservedSettledSweep(
 	args: SettledSweepArgs,
 ): Promise<SettledSweepResult> {
 	const started = Date.now();
+	const sweepMs =
+		sweepDeadlineOverrideMs ??
+		scaledBoundMs("sweep", OBSERVED_CAPTURE_BUDGET_MS);
 	const outcome = await withBounds(
 		() =>
 			scanTrackedIncrementally(args, {
 				report: true,
-				deadlineMs: started + OBSERVED_CAPTURE_BUDGET_MS,
+				deadlineMs: started + sweepMs,
 			}),
 		// The inner loop parks its own cursor at the deadline, so this outer
 		// race exists only to bound a single wedged `stat` — hence the slack.
-		OBSERVED_CAPTURE_BUDGET_MS * 2,
+		sweepMs * 2,
 		args.signal,
 		{ hook: "agent_settled", label: "runObservedSettledSweep" },
 	);
@@ -1641,13 +1656,16 @@ export async function refreshObservedMutationLedger(
 		turnIndex?: number;
 	},
 ): Promise<number> {
+	const sweepMs =
+		sweepDeadlineOverrideMs ??
+		scaledBoundMs("sweep", OBSERVED_CAPTURE_BUDGET_MS);
 	const outcome = await withBounds(
 		() =>
 			scanTrackedIncrementally(args, {
 				report: false,
-				deadlineMs: Date.now() + OBSERVED_CAPTURE_BUDGET_MS,
+				deadlineMs: Date.now() + sweepMs,
 			}),
-		OBSERVED_CAPTURE_BUDGET_MS * 2,
+		sweepMs * 2,
 		args.signal,
 		{ hook: "agent_settled", label: "refreshObservedMutationLedger" },
 	);

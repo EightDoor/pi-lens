@@ -33,7 +33,12 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** The bounds `scaledBoundMs` in clients/observed-mutation.ts accepts by name. */
-export const TIME_BOUNDS = Object.freeze(["capture", "settle"]);
+export const TIME_BOUNDS = Object.freeze([
+	"capture",
+	"settle",
+	"sweep",
+	"turn",
+]);
 
 export const DEFAULT_SCALE = 0.2;
 

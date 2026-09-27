@@ -1097,6 +1097,12 @@ describe("#2449 review round 2 — the settled sweep is incremental and honest",
 		// timeout and never ran at realistic sizes. Now it stats a window per
 		// turn from a carried cursor and reads only what moved.
 		const env = setupTestEnvironment("pi-lens-2449-incremental-");
+		// #3496: what makes the sweep incremental is the window and the carried
+		// cursor asserted below, not how fast this host stats a window. Under 8
+		// CPU hogs the real 200 ms window deadline parked the cursor
+		// ("window-parked") and the time-bound scale pass flipped this case at
+		// 0.2x, so pin the sweep bound.
+		_setObservedTimeBoundsForTests({ sweepMs: 30_000 });
 		try {
 			const tracked: string[] = [];
 			for (let index = 0; index < OBSERVED_TRACKED_MAX_FILES; index += 1) {
@@ -1139,6 +1145,7 @@ describe("#2449 review round 2 — the settled sweep is incremental and honest",
 				OBSERVED_TRACKED_MAX_FILES,
 			);
 		} finally {
+			_setObservedTimeBoundsForTests({});
 			env.cleanup();
 		}
 	});
