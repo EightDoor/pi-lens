@@ -1,0 +1,49 @@
+// tests/clients/zz-rv3521-requeue.test.ts (round-2 probe; run on bfefa1c3c and on the master merge 9fffe30cc)
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { afterEach, describe, it } from "vitest";
+import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { cleanupTestEnvironmentsDrained, createTempFile, setupTestEnvironment } from "./test-utils.js";
+
+const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+
+async function run(requeueFirst: boolean): Promise<string> {
+	const env = setupTestEnvironment("pi-lens-rv3521-rq-");
+	const previousDataDir = process.env.PILENS_DATA_DIR;
+	process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+	try {
+		const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+		fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+		const runtime = new RuntimeCoordinator();
+		runtime.projectRoot = env.tmpDir;
+		runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir); // branch X queued a format
+		const formatService = () => ({
+			recordRead: () => {},
+			formatFile: async (fp: string) => {
+				fs.writeFileSync(fp, "const x = 1;\n");
+				fs.utimesSync(fp, LONG_AGO, LONG_AGO); // keep the mtime fallback out of it
+				return { filePath: fp, formatters: [{ name: "biome", success: true, changed: true }], anyChanged: true, allSucceeded: true };
+			},
+		}) as any;
+		const base = { ctxCwd: env.tmpDir, getFlag: (n: string) => n === "no-lsp", notify: () => {}, dbg: () => {}, runtime,
+			cacheManager: { addModifiedRange: () => {} } as any, getFormatService: formatService };
+		if (requeueFirst) {
+			const ac = new AbortController(); ac.abort(); // ESC-aborted settle on X: the drain requeues
+			await handleAgentEnd({ ...base, signal: ac.signal, readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch } as any);
+		}
+		runtime.readGuard.retainBranch(new Set()); // the /tree to Y
+		if (!requeueFirst) return runtime.readGuard.checkEdit(filePath, [1, 1]).action;
+		// next settle on Y: epoch captured at settle entry, exactly as onAgentSettled does
+		await handleAgentEnd({ ...base, readGuardBranchEpoch: runtime.readGuard.currentBranchEpoch } as any);
+		return runtime.readGuard.checkEdit(filePath, [1, 1]).action;
+	} finally {
+		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR; else process.env.PILENS_DATA_DIR = previousDataDir;
+		env.cleanup();
+	}
+}
+describe("rv3521 requeue across /tree", () => {
+	afterEach(async () => { await cleanupTestEnvironmentsDrained("pi-lens-rv3521-rq-"); });
+	it("control", async () => { console.log("RQ-CONTROL", await run(false)); });
+	it("requeue", async () => { console.log("RQ-REQUEUE", await run(true)); });
+});

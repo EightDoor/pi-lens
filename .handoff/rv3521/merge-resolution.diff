@@ -1,0 +1,94 @@
+commit 9fffe30cc23efca5600993d99d5261babb3adba2
+Merge: bfefa1c3c df5fb8abb
+Author: Claude <noreply@anthropic.com>
+Date:   Sun Sep 27 09:24:09 2026 +0000
+
+    Merge origin/master (df5fb8abb) into fix/3521-fork-tree (scratch, reviewer resolution)
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01GpuMYnAosBztLRYHDcGN3W
+
+diff --cc clients/runtime-agent-end.ts
+index b522f9ccd,148c2a6fa..6827cb255
+--- a/clients/runtime-agent-end.ts
++++ b/clients/runtime-agent-end.ts
+@@@ -158,8 -152,39 +160,41 @@@ export async function handleAgentEnd(
+  	// run while the drain awaits its formatter, and nothing aborts the drain
+  	// then, so every write into session state below goes through this handle.
+  	const session = runtime.captureSessionGeneration();
+ +	const branchEpoch =
+ +		readGuardBranchEpoch ?? runtime.readGuard.currentBranchEpoch;
++ 	// #3576: the LSP service the drain started against. session_shutdown and
++ 	// the idle reset retire it without bumping the session above.
++ 	const lspService = captureLspServiceGeneration();
++ 	/**
++ 	 * #3576: the drain's resync of a file it wrote. While its session and its
++ 	 * LSP service are current, a stamped `resyncLspFile` of `read()`. Once
++ 	 * either was replaced, `getLSPService()` would build a fresh service and a
++ 	 * touch would spawn its server, so (R1) the resync goes only to a live
++ 	 * client that already holds the file; undefined then.
++ 	 */
++ 	const syncDrainWrite = async (
++ 		filePath: string,
++ 		read: () => { content: string; readStamp: number },
++ 	): Promise<LspResyncOutcome | undefined> => {
++ 		if (
++ 			session.guardedWrite(filePath, () =>
++ 				lspService.guardedWrite(filePath, () => true),
++ 			)
++ 		) {
++ 			const { content, readStamp } = read();
++ 			return resyncLspFile(
++ 				filePath,
++ 				content,
++ 				true,
++ 				false,
++ 				getFlag,
++ 				dbg,
++ 				readStamp,
++ 			);
++ 		}
++ 		await resyncHeldLspDocument(filePath);
++ 		return undefined;
++ 	};
+  	const { claimed, staleClaimed, deferredToOwner, droppedOrphans } =
+  		runtime.claimDeferredMutations(
+  			currentSessionId,
+@@@ -1040,12 -1069,9 +1079,14 @@@
+  					source: "autofix",
+  					runtime,
+  					cacheManager,
+ -					readGuard: getFlag("no-read-guard") ? undefined : runtime.readGuard,
+ +					readGuard: getFlag("no-read-guard")
+ +						? undefined
+ +						: {
+ +								recordWritten: (filePath: string) =>
+ +									runtime.readGuard.recordWritten(filePath, { branchEpoch }),
+ +							},
++ 					// #3576: a /new during the pass stops it and its bookkeeping.
++ 					session,
+  					recordAutofix: getFlag("lens-turn-summary")
+  						? (filePath) =>
+  								runtime.turnSummary.recordAutofix(filePath, {
+diff --cc tests/clients/observed-mutation-integration.test.ts
+index ff324be40,e9206ca52..26b5f697d
+--- a/tests/clients/observed-mutation-integration.test.ts
++++ b/tests/clients/observed-mutation-integration.test.ts
+@@@ -584,13 -584,13 +584,14 @@@ describe("#2430 item 3 — the settled 
+  			path.join(import.meta.dirname, "..", "..", "index.ts"),
+  			"utf-8",
+  		);
+ +		// #3521: both now take the settle's branch epoch as a second argument.
+  		const sweepAt = indexSource.indexOf(
+ -			"await runObservedSettledSweepSafely(ctx)",
+ +			"await runObservedSettledSweepSafely(ctx, ",
+  		);
+ -		const drainAt = indexSource.indexOf("await runDeferredMutationDrain(ctx)");
+ +		const drainAt = indexSource.indexOf("await runDeferredMutationDrain(ctx, ");
++ 		// #3576: the refresh runs through the settle's session guard.
+  		const refreshAt = indexSource.indexOf(
+- 			"await refreshObservedLedgerSafely(ctx)",
++ 			"() => refreshObservedLedgerSafely(ctx)",
+  		);
+  		expect(sweepAt).toBeGreaterThan(-1);
+  		expect(drainAt).toBeGreaterThan(sweepAt);
