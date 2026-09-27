@@ -952,7 +952,13 @@ a worktree whose `node_modules` is a symlink pointing outside it; no unpinned
 own home; no `pkill`/`killall` with a bare, unscoped pattern -- it matches
 machine-wide and can kill another concurrent session's TLC/vitest/etc run
 (#3556; kill the recorded PID of your own job instead, or scope `pkill -f`
-with a pattern that includes your worktree's absolute path); no `git
+with a pattern that includes your worktree's absolute path -- that scoped
+form only allows when run FROM a linked worktree: the shared main checkout's
+own path is a prefix of every worktree's path, so a pattern scoped to it
+would still match every worktree's TLC, and is denied there. `kill $(pgrep -f
+…)` and `pgrep -f … | xargs kill` carry the same machine-wide-match risk
+through a shape this hook does not recognize as killing anything at all --
+a documented blind spot, never scoped by this guard); no `git
 worktree add`/`git clone`/`mktemp -d` landing under `/tmp` -- tmpfs on the
 maintainer host, filled to 8/8 GB swap by review scratch checkouts (#3526;
 see "Paths, data, and operating systems" for where those belong); and no
