@@ -1,0 +1,52 @@
+name: Time-bound scale pass
+
+# Finds tests whose verdict depends on a production wall-clock bound (#3496).
+#
+# #3493: master went red on a tree identical to a green head. A loaded runner
+# let the 50 ms settle deadline in clients/observed-mutation.ts cut a
+# directory's 33rd entry, so the dispatch-cap case saw 32 changes. The test had
+# no timer in its source, so the flake-shape ratchet could not see it. This
+# lane shrinks each bound on purpose (PI_LENS_TEST_TIME_BOUND_SCALE) and lists
+# every test that flips, with the bound that flipped it; the judgement, the
+# admissions and the canary live in scripts/time-bound-scale-pass.mjs.
+#
+# Advisory: it runs on pull requests that touch the bounds, the pass or the
+# suites it reaches, and nightly, and never gates a merge.
+
+on:
+  pull_request:
+    paths:
+      - clients/observed-mutation.ts
+      - scripts/time-bound-scale-pass.mjs
+      - tests/clients/observed-mutation*.test.ts
+      - .github/workflows/time-bound-scale.yml
+  schedule:
+    - cron: "40 6 * * *" # 06:40 UTC nightly, after the 06:00/06:30 band
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  pass:
+    name: Time-bound scale pass (advisory)
+    runs-on: ubuntu-latest
+    # The pass is three runs of nine files; locally 48 s in all. The cap bounds
+    # a hang against GitHub's 360-minute default with room for a cold install.
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '22'
+      - name: Pin PI_LENS_HOME under the runner temp dir
+        run: echo "PI_LENS_HOME=$RUNNER_TEMP/pi-lens-home" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      - name: Run the pass
+        run: node scripts/time-bound-scale-pass.mjs

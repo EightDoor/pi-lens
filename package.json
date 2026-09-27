@@ -35,6 +35,7 @@
 		"test:targeted": "node scripts/with-test-lock.mjs --shared -- vitest run",
 		"test:watch": "vitest",
 		"test:real-harness": "node scripts/with-test-lock.mjs --shared -- vitest run",
+		"test:time-bound-scale": "node scripts/with-test-lock.mjs --shared -- node scripts/time-bound-scale-pass.mjs",
 		"mutation:diff": "node scripts/stryker-diff.mjs --base origin/master --max-files 6",
 		"hygiene": "node scripts/prune-agent-worktrees.mjs",
 		"check": "node scripts/check-extensions.mjs",

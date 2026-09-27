@@ -167,6 +167,25 @@ let captureBudgetOverrideMs: number | undefined;
 let settleDeadlineOverrideMs: number | undefined;
 
 /**
+ * #3496: the load-simulation seam for the two bounds above. On a loaded runner
+ * the settle deadline cut a directory target's 33rd entry and a test's verdict
+ * flipped with no timer in its source (#3493). `PI_LENS_TEST_TIME_BOUND_SCALE`
+ * multiplies a bound, so `scripts/time-bound-scale-pass.mjs` can shrink it
+ * and list the tests that flip; `PI_LENS_TEST_TIME_BOUND`, when set, names the
+ * one bound it applies to, so each flip is attributed to its bound. With the
+ * scale unset the production constant is returned unchanged. The override
+ * above wins at both call sites: a test that pinned its bounds is exactly the
+ * test the scale must not move.
+ */
+function scaledBoundMs(bound: "capture" | "settle", ms: number): number {
+	const scale = Number(process.env.PI_LENS_TEST_TIME_BOUND_SCALE);
+	if (!(scale > 0)) return ms;
+	const only = process.env.PI_LENS_TEST_TIME_BOUND;
+	if (only && only !== bound) return ms;
+	return ms * scale;
+}
+
+/**
  * Entries taken from a DIRECTORY-shaped target path, non-recursively.
  *
  * A tool that names a directory is saying "I operate in here"; its own entries
@@ -781,7 +800,8 @@ export async function armObservedMutation(
 	const started = Date.now();
 	const timeoutMs = Math.min(
 		remaining,
-		captureBudgetOverrideMs ?? OBSERVED_CAPTURE_BUDGET_MS,
+		captureBudgetOverrideMs ??
+			scaledBoundMs("capture", OBSERVED_CAPTURE_BUDGET_MS),
 	);
 	const outcome = await withBounds(
 		async () => {
@@ -1026,7 +1046,8 @@ export async function settleObservedMutation(
 
 	const started = Date.now();
 	const settleDeadlineMs =
-		settleDeadlineOverrideMs ?? OBSERVED_SETTLE_DEADLINE_MS;
+		settleDeadlineOverrideMs ??
+		scaledBoundMs("settle", OBSERVED_SETTLE_DEADLINE_MS);
 	// The target is `paths[0]` for a file target and the whole (already capped)
 	// entry list for a directory one. The deadline can only ever cut a directory
 	// target's tail — `captureFileStatsForPaths` always runs its first entry.
