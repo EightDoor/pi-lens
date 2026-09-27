@@ -1,0 +1,1 @@
+feat(formal): session-lifecycle composition model (refs #3609)
