@@ -44,7 +44,6 @@ Durable copies live on the branch `orchestrator/handoff-2026-09-27` on origin, u
 
 | PR | Group | Head | State / next action |
 |---|---|---|---|
-| **#3619** | G13 CI hygiene (closes #3497, #3563) | `f61ba1023` | Pushed, verified SHIP; auto-merge on, subscribed. The close-keyword check failed on the first body, so `Closes` lines were added. Confirm that check reran and passed; if not, re-trigger it by editing the body. Watch Unit and Lint. |
 | **(no PR yet)** | G20 lock-wait (refs #3594) | `f07d73f1c`, **pushed** to `fix/3594-lock-wait` | Items 1 and 3 are verified. Item 2 is withdrawn (see §4). The self-check on a merge with current master passed 154/154. **Next:** open the PR from `.handoff/pr-bodies/fix-3594.md`, title `fix(locks): remembered-holder skip for acquireBoundedPidFileLock (refs #3594)`. The body has no Closes line, which is correct because it is `refs`. Enable auto-merge and subscribe. |
 
 Merged this session:
@@ -52,6 +51,7 @@ Merged this session:
 - #3606 (G7)
 - #3608 (G19)
 - #3610 (G6)
+- #3619 (G13): closes #3497 and #3563; merged 09:29
 
 Earlier merges are in #3518's Done list.
 
