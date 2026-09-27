@@ -61,9 +61,8 @@ export function testPopulation(repoRoot) {
 	const walk = (dir) => {
 		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
 			const absolute = path.join(dir, entry.name);
-			if (entry.isDirectory()) {
-				if (entry.name !== "fixtures") walk(absolute);
-			} else if (
+			if (entry.isDirectory()) walk(absolute);
+			else if (
 				entry.name.endsWith(".test.ts") &&
 				fs
 					.readFileSync(absolute, "utf8")
