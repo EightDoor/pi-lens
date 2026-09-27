@@ -7,8 +7,8 @@ session boundaries. The `TLA+ models` CI job
 (`node scripts/check-tla-models.mjs`) checks every config here against its
 `\* expect:` line.
 
-Issues: #3519, #3523 and #3524 are fixed in the code and modelled as such.
-The configs for #3520, #3521, #3522 and #3525 still document their bugs
+Issues: #3519, #3521, #3523 and #3524 are fixed in the code and modelled as
+such. The configs for #3520, #3522 and #3525 still document their bugs
 against the current code (`violated`).
 
 ## Scope
@@ -52,11 +52,17 @@ change.
 - **Boundaries**:
   - user turn;
   - `/new` (a fresh guard);
-  - `/fork` (a fresh guard plus `importState` of the parent's read-set,
-    `index.ts`). pi forks *before* a chosen user message, so the conversation
-    loses everything after it;
-  - `/tree` (the conversation moves; pi-lens has no handler, so the guard is
-    untouched).
+  - `/fork` (a fresh guard in a new activation; pi forks *before* a chosen
+    user message, so the conversation loses everything after it);
+  - `/tree` (the conversation moves inside the same activation).
+
+  Since #3521 (`BranchFilter`), both keep exactly the records whose tool
+  result is on the new branch, each whole, and clear the FileTime stamp,
+  `writtenThisSession`, pending creations and the edit history, and
+  re-anchor the mtime fallback (`read-guard.ts` `retainBranch` /
+  `importBranch`, `index.ts` `session_tree` and `session_start`). Before it,
+  `/fork` imported nothing (pi re-runs the extension factory, so the
+  closure-local stash died) and `/tree` had no handler.
 
 `know` is what the conversation has shown the agent: read results, its own
 edits and writes, and the authoritative attachment.
@@ -66,8 +72,11 @@ edits and writes, and the authoritative attachment.
 The current code is `HandlerEvidence = FALSE`, `CreationHandlerEvidence =
 TRUE`, `RecordAuthoritative = TRUE`, `RecordOwnEdit = TRUE`,
 `OwnEditSkipsReloc = TRUE`, `MtimeAuthored = TRUE`, `OwnEditRescue = TRUE`,
-`ForkImport = TRUE`, `SuppressByNewerContext = TRUE`, `FormatStamp = TRUE`,
+`BranchFilter = TRUE`, `SuppressByNewerContext = TRUE`, `FormatStamp = TRUE`,
 `SpanSnapshot = FALSE`, `RelocFromLatest = FALSE`, `ForkAtBoundary = FALSE`.
+`ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
+was `ForkImport = FALSE` (the fork imported nothing), not `TRUE` as this file
+used to say.
 A config that turns one of these off either names the bug it isolates (for
 example `MtimeAuthored = FALSE` in `Guarded`, so bug 2 does not mask the rest)
 or is a mutant of this PR's fixes (`*NoRecord`, `EvidenceAtResultHandler`,
@@ -93,7 +102,7 @@ The model follows `checkEdit` step by step:
 
 | Invariant | Promise |
 |---|---|
-| `NoStaleAllow` | An allowed or relocated edit of lines the agent was shown lands on lines that still hold what it was shown. `read-guard.ts` header items 2-3; "must never mask a real staleness" (`importState`). |
+| `NoStaleAllow` | An allowed or relocated edit of lines the agent was shown lands on lines that still hold what it was shown. `read-guard.ts` header items 2-3; `importBranch` never re-hashes a record from today's disk. |
 | `NoBlindAllow` | An edit of lines this conversation never showed the agent is refused. Header item 1, "Read state from session 1 never authorises session 2". With `contextLines > 0` the guard admits ±contextLines by design (`ContextSlack`). |
 | `NoFalseBlock` | With hashes, an edit whose target lines hold exactly what the agent was shown is never refused. The attachment is "authoritative for subsequent edits". `recordWritten` exists so an own write "doesn't trigger file_modified". |
 
@@ -105,7 +114,10 @@ nor refuse an exact one.
 
 TLC 2.19 (`tla2tools.jar` v1.7.4), `-workers auto`. Times were measured on a
 loaded machine (load average about 6-8 on 4 cores): 80 s for the 30 configs
-here (82 s wall at `-workers 2`), `NewSession` the slowest at 14 s.
+before #3521 (82 s wall at `-workers 2`), `NewSession` the slowest at 14 s.
+With #3521's eight configs and the deterministic `-workers 1` (#3517), the
+36 configs took 164 s one after another at load average about 4-6; the
+#3521 configs were 56 s of that, `TreeFilterExt` the slowest at 21 s.
 
 `Guarded` runs at three agent ops to fit CI's `TLA+ models` budget (#3572).
 At three ops, every mutant keeps its verdict and the #3523 flip still flips.
@@ -136,7 +148,14 @@ head that added this model. It is not checked in CI.
 | `Unhashed` / `UnhashedNoFileTime` | current code without line hashes / without FileTime | pass / violated `NoStaleAllow` | 13,370 / 243 |
 | `ContextSlack` | the admitted `contextLines` slack | violated `NoBlindAllow` | 79 |
 | `MtimeAuthored`, `MtimeAuthoredNew` | #3520 | violated `NoBlindAllow` | 9 / 36 |
-| `ForkCarriesReads`, `TreeCarriesReads` | #3521 | violated `NoBlindAllow` | 314 / 392 |
+| `TreeFilter` | #3521 fixed: `/tree` with reads, ranged reads, edits and writes | pass | 50,413 |
+| `TreeFilterMtime` | the same with the #3520 mtime fallback on: the re-anchored `born` | pass | 50,413 |
+| `TreeFilterExt` | #3521 fixed, another writer anywhere | pass | 344,765 |
+| `TreeFilterUnhashed` | #3521 fixed without hashes (the #3525 rescue off, as in `Unhashed`) | pass | 1,174 |
+| `TreeCarriesReads` | the same as `TreeFilter`'s base with `BranchFilter = FALSE` (the code before #3521: no handler) | violated `NoBlindAllow` | 337 |
+| `ForkFilter` | #3521 fixed: `/fork` | pass | 50,036 |
+| `ForkFilterUnhashed` | #3521 fixed at `/fork` without hashes | pass | 1,150 |
+| `ForkDropsReads` | `BranchFilter = FALSE`, `ForkImport = FALSE` (the code before #3521: the fork imports nothing) | violated `NoFalseBlock` | 876 |
 | `ContextSuppress`, `SpanAcrossReads` | #3522 | violated `NoStaleAllow` | 2,905 / 2,964 |
 | `UnhashedOwnEditRescue`, `UnhashedFormatStamp` | #3525 | violated `NoStaleAllow` | 449 / 160 |
 
@@ -144,7 +163,7 @@ head that added this model. It is not checked in CI.
 FALSE`, so the creation-read race `CreationAtResult` documents cannot mask the
 relocation check.
 
-The investigation's configs for the candidate fixes of #3520, #3521, #3522
+The investigation's configs for the candidate fixes of #3520, #3522
 and #3525 (`AllFixes`, `AllFixesCtx`, `SpanSnapshotFix*`, `UnhashedFix`,
 `NoMtimeAuthored`, `ForkAtBoundary`, `ForkImportWholeRecord`,
 `OwnEditRecorded*`, `OwnEditRescueContext`) are not here; each arrives with its
@@ -180,3 +199,15 @@ configs through the real `handleToolCall` / `handleToolResult`, with pi's real
 - The host rejects edits past EOF, so the model does not count them.
 - The TOCTOU between `checkEdit` at tool_call and the host's positional apply
   is not modelled.
+- `/fork` and `/tree` only reach "before the current prompt"
+  (`BeforePrompt`, `r.g < turnNo`), and the model's records are matched to
+  the branch exactly. The code matches a record to the branch by its tool
+  call's `toolResult` on `getBranch()`, which also covers mid-turn targets,
+  forward and sibling moves, `/clone` and resume; those are replayed through
+  pi's real runtime in `tests/index-3521-fork-tree-witness.test.ts`. The
+  accepted residual there, a provider that reuses tool-call ids across
+  branches, is not modelled. Clearing the edit history at a move
+  (`lastEditOk' = FALSE`) is inert in every config here, because the
+  snapshot check already refuses a hashed stale edit and the unhashed
+  configs turn the rescue off; `tests/clients/read-guard-branch.test.ts`
+  pins it on the code.

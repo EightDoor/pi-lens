@@ -285,6 +285,7 @@ const EXPECTED_HOOKS = [
 	"resources_discover",
 	"session_start",
 	"session_before_fork",
+	"session_tree",
 	"tool_call",
 	"tool_result",
 	"turn_start",
@@ -938,14 +939,19 @@ describe("index.ts extension wiring", () => {
 					{ reason: "fork", targetSessionFile: childFile },
 					parent,
 				);
-				for (const name of pi.tools.keys()) pi.activeTools.add(name);
-				await pi.emit(
+				// #3521: pi re-runs the extension factory for the forked runtime,
+				// so the child's session_start reaches a SECOND activation that
+				// shares only the module with the parent's.
+				const forked = createPiMock();
+				extension(forked.asExtensionAPI());
+				for (const name of forked.tools.keys()) forked.activeTools.add(name);
+				await forked.emit(
 					"session_start",
 					{ reason: "fork", previousSessionFile: parentFile },
 					child,
 				);
-				expect(pi.activeTools.has("ast_grep_search")).toBe(true);
-				expect(pi.activeTools.has("ast_grep_replace")).toBe(false);
+				expect(forked.activeTools.has("ast_grep_search")).toBe(true);
+				expect(forked.activeTools.has("ast_grep_replace")).toBe(false);
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;

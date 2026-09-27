@@ -1013,7 +1013,7 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/project-snapshot.ts": 10,
 		"clients/read-bridge.ts": 1,
 		"clients/read-guard-tool-lines.ts": 4,
-		"clients/read-guard.ts": 22,
+		"clients/read-guard.ts": 20,
 		"clients/runtime-agent-end.ts": 54,
 		"clients/runtime-context.ts": 2,
 		"clients/runtime-coordinator.ts": 16,

@@ -349,8 +349,8 @@ describe("reconcileStaleWidgetFiles — live widget freshness (lens_diagnostics)
 
 describe("read-guard read-set persistence across resume (#1041)", () => {
 	it("save → load → import rehydrates the read-set so a resumed edit is allowed", async () => {
-		// Real file on disk so recordRead captures line hashes and importState can
-		// reconcile them against current content.
+		// Real file on disk so recordRead captures line hashes and the resumed
+		// edit's per-line check can compare them against current content.
 		const fileDir = mkdtempSync(join(tmpdir(), "pi-lens-rg-resume-"));
 		const filePath = join(fileDir, "foo.ts");
 		writeFileSync(
@@ -376,6 +376,7 @@ describe("read-guard read-set persistence across resume (#1041)", () => {
 				turnIndex: 1,
 				writeIndex: 1,
 				timestamp: Date.now(),
+				toolCallId: "call_resume_read",
 			});
 			await saveSessionState(
 				cwd,
@@ -389,7 +390,11 @@ describe("read-guard read-set persistence across resume (#1041)", () => {
 			expect(loaded?.readGuard).toBeDefined();
 			const guard2 = createReadGuard("resume-session-2");
 			expect(guard2.checkEdit(filePath, [20, 30]).action).toBe("block");
-			const result = guard2.importState(loaded?.readGuard);
+			// #3521: the read's tool result is on the resumed branch.
+			const result = guard2.importBranch(
+				loaded?.readGuard,
+				new Set(["call_resume_read"]),
+			);
 			expect(result.imported).toBe(1);
 			expect(guard2.getReadHistory(filePath)).toHaveLength(1);
 			expect(guard2.checkEdit(filePath, [20, 30]).action).toBe("allow");
@@ -409,10 +414,47 @@ describe("read-guard read-set persistence across resume (#1041)", () => {
 
 		// Importing the absent field is a null-safe no-op — no throw.
 		const guard = createReadGuard("legacy-session");
-		expect(() => guard.importState(loaded?.readGuard)).not.toThrow();
-		expect(guard.importState(loaded?.readGuard)).toEqual({
+		expect(() =>
+			guard.importBranch(loaded?.readGuard, new Set()),
+		).not.toThrow();
+		expect(guard.importBranch(loaded?.readGuard, new Set())).toEqual({
 			imported: 0,
 			dropped: 0,
 		});
+	});
+
+	it("backward-compat: a version-1 read-set loads as a clean guard, never a crash (#3521)", async () => {
+		// Before #3521 records carried no toolCallId, so nothing can be matched
+		// against the branch: the widget still rehydrates, the guard starts clean.
+		const fileDir = mkdtempSync(join(tmpdir(), "pi-lens-rg-v1-"));
+		const filePath = join(fileDir, "foo.ts");
+		writeFileSync(filePath, "a\nb\nc\n");
+		try {
+			seedDiagnostics();
+			const v1Record = {
+				filePath,
+				requestedOffset: 1,
+				requestedLimit: 3,
+				effectiveOffset: 1,
+				effectiveLimit: 3,
+				expandedByLsp: false,
+				turnIndex: 1,
+				writeIndex: 1,
+				timestamp: Date.now(),
+			};
+			await saveSessionState(cwd, "v1-session", exportWidgetState(), {
+				version: 1,
+				reads: [[filePath, [v1Record]]],
+			});
+			const loaded = await loadSessionState(cwd, "v1-session");
+			expect(loaded?.widget.files.length).toBeGreaterThan(0);
+			const guard = createReadGuard("v1-session");
+			expect(
+				guard.importBranch(loaded?.readGuard, new Set(["anything"])),
+			).toEqual({ imported: 0, dropped: 0 });
+			expect(guard.getReadHistory(filePath)).toHaveLength(0);
+		} finally {
+			rmSync(fileDir, { recursive: true, force: true });
+		}
 	});
 });

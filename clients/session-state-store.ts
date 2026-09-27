@@ -29,7 +29,7 @@ export interface PersistedSessionState {
 	 * persisted before this field existed simply omit it, and load cleanly as
 	 * "no prior reads" — so STATE_VERSION is deliberately NOT bumped (a bump
 	 * would reject those older files entirely and lose their widget rehydration
-	 * too). Rehydrated with disk-staleness reconciliation by ReadGuard.importState.
+	 * too). Imported for the resumed branch by ReadGuard.importBranch (#3521).
 	 */
 	readGuard?: PersistedReadGuardState;
 }

@@ -35,10 +35,11 @@
 (*  - pi-lens' deferred agent_end format drain (runtime-agent-end.ts ~710):*)
 (*    rewrites F, then recordWritten.                                      *)
 (*  - boundaries: user turn (kTurn = what the agent knew before the        *)
-(*    prompt), /new (fresh guard), /fork (fresh guard + importState of the *)
-(*    parent's read-set, index.ts ~2510-2525; the conversation restarts    *)
-(*    BEFORE a chosen user message), /tree (conversation moves, guard      *)
-(*    untouched: no pi-lens handler).                                      *)
+(*    prompt), /new (fresh guard), /fork (the conversation restarts BEFORE *)
+(*    a chosen user message) and /tree (the conversation moves). Since     *)
+(*    #3521 both keep exactly the records whose tool result is on the new  *)
+(*    branch (BranchFilter); before it, /fork imported nothing and /tree   *)
+(*    left the guard untouched.                                            *)
 (*                                                                         *)
 (* The agent's knowledge `know` is what the conversation shows it: read    *)
 (* results, its own edits and writes, the authoritative attachment.        *)
@@ -65,7 +66,7 @@ CONSTANTS
     CreationHandlerEvidence, \* TRUE (code): the injected creation read is hashed from disk at tool_result
     MtimeAuthored,  \* TRUE (code): zero-read allow when mtime >= guard construction
     OwnEditRescue,  \* TRUE (code): canTreatStalenessAsOwnPriorEdit
-    ForkImport,     \* TRUE (code): a fork imports the parent's whole read-set
+    ForkImport,     \* FALSE (code before #3521): pi re-runs the factory for a fork, so the closure stash died and the fork imported nothing
     SuppressByNewerContext, \* TRUE (code): a newer context-only candidate cancels a snapshot mismatch
     FormatStamp,    \* TRUE (code): the agent_end format drain calls recordWritten
     \* ---- candidate fixes ----
@@ -75,6 +76,7 @@ CONSTANTS
     SpanSnapshot,        \* check each line of the range against the newest read that delivered it
     RelocFromLatest,     \* relocate only from a read that is the agent's latest view of every line
     ForkAtBoundary,      \* fork/tree: forget reads made after the fork point
+    BranchFilter,        \* TRUE (code since #3521): fork/tree keep the branch's records whole, clear FileTime, written, pendCreate and the own-edit rescue, and re-anchor born
     \* ---- existing guards (FALSE = mutant with the guard removed) ----
     FileTimeCheck, CoverageCheck, SnapshotCheck
 
@@ -424,31 +426,46 @@ New ==
     /\ nb' = nb + 1 /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE
     /\ UNCHANGED <<disk, rev, tok, pc, pend, ops, ext, staleAllow, blindAllow, falseBlock>>
 
-\* /fork: the conversation restarts before the current prompt (kTurn); the new
-\* guard imports the parent's read-set, reconciled against disk only.
+\* /fork: the conversation restarts before the current prompt (kTurn).
+\* BranchFilter (#3521): the fork keeps the records made before the point,
+\* whole, with no FileTime stamp (importBranch). Otherwise the candidates the
+\* switches name: import the parent's read-set reconciled against disk only
+\* (ForkImport), or nothing (the code before #3521).
 Kept(S) == SelectSeq(S, AllHashesMatch)
 BeforePrompt(r) == r.g < turnNo
 Fork ==
     /\ Idle /\ "fork" \in Bounds /\ nb < MaxBounds
-    /\ LET src == IF ForkAtBoundary THEN SelectSeq(reads, BeforePrompt) ELSE reads
-           imp == IF ForkImport THEN Kept(src) ELSE <<>>
-       IN /\ reads' = imp
-          /\ ft' = IF Len(imp) > 0 THEN rev ELSE -1      \* recordRead stamps FileTime
+    /\ IF BranchFilter
+         THEN /\ reads' = SelectSeq(reads, BeforePrompt)
+              /\ ft' = -1
+         ELSE LET src == IF ForkAtBoundary THEN SelectSeq(reads, BeforePrompt) ELSE reads
+                  imp == IF ForkImport THEN Kept(src) ELSE <<>>
+              IN /\ reads' = imp
+                 /\ ft' = IF Len(imp) > 0 THEN rev ELSE -1      \* recordRead stamps FileTime
     /\ UNCHANGED turnNo
     /\ written' = FALSE /\ pendCreate' = FALSE /\ lastEditOk' = FALSE /\ born' = rev
     /\ know' = kTurn
     /\ nb' = nb + 1 /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE
     /\ UNCHANGED <<disk, rev, tok, kTurn, pc, pend, ops, ext, staleAllow, blindAllow, falseBlock>>
 
-\* /tree: the conversation moves to an earlier point; pi-lens has no handler.
+\* /tree: the conversation moves to an earlier point in the same activation.
+\* BranchFilter (#3521, retainBranch): keep the branch's records whole, clear
+\* the FileTime stamp (so each kept record passes the per-line hash rescue),
+\* writtenThisSession, pending creations and the edit history, and re-anchor
+\* the mtime fallback. Without it (the code before #3521), no handler.
 Tree ==
     /\ Idle /\ "tree" \in Bounds /\ nb < MaxBounds
     /\ know' = kTurn
-    /\ reads' = IF ForkAtBoundary THEN SelectSeq(reads, BeforePrompt) ELSE reads
+    /\ IF BranchFilter
+         THEN /\ reads' = SelectSeq(reads, BeforePrompt)
+              /\ ft' = -1 /\ written' = FALSE /\ pendCreate' = FALSE
+              /\ lastEditOk' = FALSE /\ born' = rev
+         ELSE /\ reads' = IF ForkAtBoundary THEN SelectSeq(reads, BeforePrompt) ELSE reads
+              /\ written' = IF ForkAtBoundary THEN FALSE ELSE written   \* writtenThisSession
+              /\ UNCHANGED <<ft, pendCreate, lastEditOk, born>>
     /\ UNCHANGED turnNo
-    /\ written' = IF ForkAtBoundary THEN FALSE ELSE written   \* writtenThisSession
     /\ nb' = nb + 1
-    /\ UNCHANGED <<disk, rev, tok, kTurn, ft, pendCreate, lastEditOk, born,
+    /\ UNCHANGED <<disk, rev, tok, kTurn,
                    pc, pend, ops, ext, fixedTurn, mutatedTurn,
                    staleAllow, blindAllow, falseBlock>>
 

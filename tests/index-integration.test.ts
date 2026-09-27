@@ -97,7 +97,7 @@ function createMockPi(overrides: Record<string, boolean> = {}) {
 // `exportState` is production-faithful: the same `version` field
 // `clients/read-guard.ts` writes, read off the real module so a version bump
 // cannot silently make the double lie. Nothing else was added — a probe that
-// made `importState`/`hasKnownPath`/`forgetPath`/`recordSymbolRead` throw left
+// made `hasKnownPath`/`forgetPath`/`recordSymbolRead` throw left
 // the file green at 61 passed, so no path here reaches them, and a future path
 // that does now crashes LOUDLY rather than silently (that is this PR).
 vi.mock("../clients/read-guard.js", async (importOriginal) => {
@@ -120,6 +120,8 @@ vi.mock("../clients/read-guard.js", async (importOriginal) => {
 			version: actual.READ_GUARD_STATE_VERSION,
 			reads: [],
 		});
+		// #3521: every primary session_start imports the branch's reads.
+		importBranch = () => ({ imported: 0, dropped: 0 });
 		getSummary = () => ({
 			totalEdits: 0,
 			totalBlocks: 0,

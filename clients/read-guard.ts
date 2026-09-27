@@ -54,6 +54,14 @@ export interface ReadRecord {
 	source?: string;
 	/** A requested native-read range that has not been confirmed as delivered. */
 	provisional?: boolean;
+	/**
+	 * The host tool call whose result carried this evidence into the
+	 * conversation (#3521), in `resolveToolCallCorrelationId` form. After a
+	 * conversation move (`/tree`, `/fork`, `/clone`, resume) a record is kept
+	 * only when this call's `toolResult` is on the new branch; a record without
+	 * one (a bridge read, a host that sends no id) is dropped there.
+	 */
+	toolCallId?: string;
 }
 
 /**
@@ -166,7 +174,11 @@ export interface PersistedReadGuardState {
 	reads: Array<[string, ReadRecord[]]>;
 }
 
-export const READ_GUARD_STATE_VERSION = 1;
+/**
+ * 2 since #3521: records carry `toolCallId`. A version-1 sidecar has no ids
+ * to match against the branch, so it loads as no reads (one re-read).
+ */
+export const READ_GUARD_STATE_VERSION = 2;
 
 // --- Constants ---
 
@@ -573,7 +585,7 @@ export class ReadGuard {
 	private readonly exemptions = new Set<string>(); // One-time exemptions via /lens-allow-edit
 	private readonly pendingCreations = new Map<
 		string,
-		{ turnIndex: number; writeIndex: number }
+		{ turnIndex: number; writeIndex: number; toolCallId?: string }
 	>();
 	// Files that recordWritten() has fired on this session. Lets
 	// wasWrittenThisSession() return a deterministic answer for files the
@@ -615,7 +627,8 @@ export class ReadGuard {
 	/** Running per-file record-cap trim totals for this session (#1913 F1). */
 	private readonly trimAccumulators = new Map<string, FileTrimStats>();
 	private readonly sessionId: string;
-	private readonly sessionStartMs: number;
+	/** Re-anchored at every conversation move (#3521); see `retainBranch`. */
+	private sessionStartMs: number;
 
 	constructor(sessionId: string, config: Partial<ReadGuardConfig> = {}) {
 		this.sessionId = sessionId;
@@ -950,6 +963,7 @@ export class ReadGuard {
 		symbol: { name: string; kind: string; startLine: number; endLine: number },
 		turnIndex: number,
 		writeIndex: number,
+		toolCallId?: string,
 	): void {
 		const span = Math.max(1, symbol.endLine - symbol.startLine + 1);
 		this.recordRead({
@@ -968,6 +982,7 @@ export class ReadGuard {
 			turnIndex,
 			writeIndex,
 			timestamp: Date.now(),
+			...(toolCallId !== undefined && { toolCallId }),
 		});
 	}
 
@@ -1341,10 +1356,12 @@ export class ReadGuard {
 		filePath: string,
 		turnIndex: number,
 		writeIndex: number,
+		toolCallId?: string,
 	): void {
 		this.pendingCreations.set(normalizeEphemeralMapKey(filePath), {
 			turnIndex,
 			writeIndex,
+			...(toolCallId !== undefined && { toolCallId }),
 		});
 	}
 
@@ -1377,6 +1394,7 @@ export class ReadGuard {
 				filePath,
 				creation.turnIndex,
 				creation.writeIndex,
+				creation.toolCallId,
 			);
 		}
 	}
@@ -1497,57 +1515,87 @@ export class ReadGuard {
 	}
 
 	/**
-	 * Rehydrate a persisted read-set (#1041) into this (fresh, post-resume)
-	 * guard, with mandatory staleness reconciliation: each read is re-verified
-	 * against the CURRENT on-disk content via its recorded `lineHashes`, and any
-	 * read whose file changed (or no longer exists, or that carries no verifiable
-	 * hashes) is DROPPED. A rehydrated read must never mask a real staleness — a
-	 * resume must not let the agent edit a file that changed on disk while it
-	 * believed it held a fresh read. Kept reads are replayed through
-	 * {@link recordRead}, which re-keys through {@link key} (idempotent — the
-	 * exported keys are already normalized) and re-stamps FileTime so the next
-	 * `checkEdit` sees a consistent baseline. Version-guarded and null-safe:
-	 * `undefined` / a mismatched version / a missing field loads as "no prior
-	 * reads". Returns a count of imported vs dropped reads for logging.
+	 * Keep exactly the reads the conversation still shows the agent, after it
+	 * moved to another branch in this activation (`/tree`, #3521).
+	 *
+	 * A record stays, whole, when its `toolCallId` is in `onBranch` (the
+	 * `toolResult`s on the new branch); every other record is deleted. Nothing
+	 * is re-verified or re-stamped here: the FileTime stamps are cleared, so
+	 * each kept record must pass the per-line hash check against disk at the
+	 * next edit. A stamp taken on the abandoned branch would otherwise vouch
+	 * for bytes this branch never showed. Edits, authored-write and
+	 * pending-creation state came from the old branch too, so they go, and the
+	 * mtime fallback of `wasWrittenThisSession` is re-anchored to now.
 	 */
-	importState(state: PersistedReadGuardState | undefined): {
-		imported: number;
+	retainBranch(onBranch: ReadonlySet<string>): {
+		kept: number;
 		dropped: number;
 	} {
+		const result = { kept: 0, dropped: 0 };
+		for (const [filePath, records] of this.reads) {
+			const kept: ReadRecord[] = [];
+			for (const read of records)
+				if (read.toolCallId !== undefined && onBranch.has(read.toolCallId))
+					kept.push(read);
+			result.kept += kept.length;
+			result.dropped += records.length - kept.length;
+			if (kept.length > 0) {
+				this.reads.set(filePath, kept);
+				continue;
+			}
+			this.reads.delete(filePath);
+		}
+		this.edits.clear();
+		this.writtenThisSession.clear();
+		this.pendingCreations.clear();
+		this.fileTime.clear();
+		// #3520 owns deleting this fallback; until then a write made on the
+		// abandoned branch must not read as authored on this one.
+		this.sessionStartMs = Date.now();
+		return result;
+	}
+
+	/**
+	 * Load a persisted read-set (#1041) for the branch this session starts on
+	 * (#3521): a resume, `pi --fork`, or the fork/clone hand-off. The same rule
+	 * as {@link retainBranch}: a record is imported, whole, only when its
+	 * `toolCallId` is in `onBranch`, and without a FileTime stamp, so the
+	 * per-line hash check decides each edit against the current disk. The
+	 * guard is fresh here (`resetForSession`), so there is no older
+	 * conversation state to clear. A
+	 * record for a file that no longer exists is dropped. Version-guarded and
+	 * null-safe: `undefined`, a version-1 sidecar (no ids), or a malformed
+	 * payload loads as no reads and never throws — a throw here would abort
+	 * the whole session_start rehydration.
+	 */
+	importBranch(
+		state: PersistedReadGuardState | undefined,
+		onBranch: ReadonlySet<string>,
+	): { imported: number; dropped: number } {
 		const result = { imported: 0, dropped: 0 };
 		if (!state || state.version !== READ_GUARD_STATE_VERSION) return result;
-		// A corrupt/hand-edited sidecar must degrade to "no prior reads", never
-		// throw: loadSessionState validates only version/widget, so a malformed
-		// `reads` reaches here. If importState threw, the session_start try/catch
-		// would abort the ENTIRE rehydration (incl. widget + mountLensWidget)
-		// rather than just skipping the read-set.
 		if (!Array.isArray(state.reads)) return result;
 		for (const entry of state.reads) {
-			// Skip anything that isn't a well-formed [key, records] tuple.
 			if (!Array.isArray(entry) || entry.length !== 2) continue;
 			const [rawPath, records] = entry;
 			if (typeof rawPath !== "string") continue;
 			if (!Array.isArray(records) || records.length === 0) continue;
 			const filePath = this.key(rawPath);
-			let lines: string[];
-			try {
-				lines = splitLines(fs.readFileSync(filePath, "utf-8"));
-			} catch {
-				// File gone since it was read → drop every read for it.
-				result.dropped += records.length;
-				continue;
-			}
-			for (const record of records) {
-				const rehydrated: ReadRecord = { ...record, filePath };
-				// readHashesStillMatch returns false when the recorded hashes no
-				// longer match disk OR when the read captured no hashes — both
-				// unverifiable, so both drop (safety over convenience).
-				if (this.readHashesStillMatch(rehydrated, lines)) {
-					this.recordRead(rehydrated);
-					result.imported += 1;
-				} else {
+			const exists = fs.existsSync(filePath);
+			for (const read of records) {
+				const id = (read as Partial<ReadRecord> | undefined)?.toolCallId;
+				if (!exists || typeof id !== "string" || !onBranch.has(id)) {
 					result.dropped += 1;
+					continue;
 				}
+				// `?? {}`: a record without hashes must not be re-hashed from
+				// today's disk by recordRead; that would vouch for bytes written
+				// after the conversation last saw the file.
+				this.recordRead(
+					{ ...read, filePath, lineHashes: read.lineHashes ?? {} },
+					{ stampFileTime: false },
+				);
+				result.imported += 1;
 			}
 		}
 		return result;
@@ -1568,6 +1616,7 @@ export class ReadGuard {
 		filePath: string,
 		turnIndex: number,
 		writeIndex: number,
+		toolCallId?: string,
 	): void {
 		let lineCount = 0;
 		try {
@@ -1586,6 +1635,7 @@ export class ReadGuard {
 			turnIndex,
 			writeIndex,
 			timestamp: Date.now(),
+			...(toolCallId !== undefined && { toolCallId }),
 		});
 	}
 
