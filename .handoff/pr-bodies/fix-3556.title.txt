@@ -1,0 +1,1 @@
+feat(hooks): guard-bash denies shared-tool pkill, /tmp checkouts, ungated commits (closes #3556, closes #3526, refs #3471)

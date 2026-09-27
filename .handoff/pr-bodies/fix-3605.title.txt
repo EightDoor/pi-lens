@@ -1,0 +1,1 @@
+fix(tree-sitter): contain wasm traps to their file (closes #3605)

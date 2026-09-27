@@ -1,0 +1,1 @@
+fix(registry): queue deregisterInstanceRoot's own-hold removal on the tail (closes #3587)

@@ -1,0 +1,31 @@
+diff --git a/tests/clients/observed-mutation-time-bound-scale.test.ts b/tests/clients/observed-mutation-time-bound-scale.test.ts
+index aae9f1475..633253ed1 100644
+--- a/tests/clients/observed-mutation-time-bound-scale.test.ts
++++ b/tests/clients/observed-mutation-time-bound-scale.test.ts
+@@ -72,9 +72,9 @@ const SCALE = "0.01";
+  */
+ const CANARY_ADVANCE_MS: Record<Probe, number> = {
+ 	capture: 199,
+-	settle: 199,
+-	sweep: 399,
+-	refresh: 399,
++	settle: 49,
++	sweep: 199,
++	refresh: 199,
+ 	turn: 0,
+ };
+ 
+@@ -104,11 +104,10 @@ afterEach(() => {
+ 
+ /** Start `work` on the fake clock, advance it, and hand back the real one. */
+ function onFakeClock<T>(work: () => Promise<T>, advanceMs: number): Promise<T> {
+-	vi.useFakeTimers();
++	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+ 	const running = work();
+ 	vi.advanceTimersByTime(advanceMs);
+-	vi.useRealTimers();
+-	return running;
++	return running.finally(() => vi.useRealTimers());
+ }
+ 
+ function arm(toolCallId: string, advanceMs: number) {
