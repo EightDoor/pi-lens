@@ -884,6 +884,13 @@ export type DegradationKind =
 	 */
 	| "read-guard-record-cap-trim"
 	/**
+	 * #3521: a deferred writer (the agent_settled sweep or the format, autofix
+	 * or LSP quick-fix drain) captured the read guard's branch epoch before a
+	 * `/tree`, and its `recordWritten` landed after it. The write is not
+	 * credited to the new branch, which never showed it. One subject, counted.
+	 */
+	| "read-guard-write-after-branch-move"
+	/**
 	 * The tier-3 cascade's outstanding-touch registry
 	 * (`clients/lsp/cascade-tier.ts`) reached its cap before a quiet-window
 	 * reconcile drained it, so the oldest touch was dropped unanswered (#1899).

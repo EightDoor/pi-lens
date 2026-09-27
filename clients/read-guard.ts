@@ -629,6 +629,12 @@ export class ReadGuard {
 	private readonly sessionId: string;
 	/** Re-anchored at every conversation move (#3521); see `retainBranch`. */
 	private sessionStartMs: number;
+	/**
+	 * Bumped by every `retainBranch` (#3521). A deferred writer captures it
+	 * before it awaits, and `recordWritten` refuses the write when a `/tree`
+	 * moved the conversation in between (catalog shape 22).
+	 */
+	private branchEpoch = 0;
 
 	constructor(sessionId: string, config: Partial<ReadGuardConfig> = {}) {
 		this.sessionId = sessionId;
@@ -1369,8 +1375,21 @@ export class ReadGuard {
 	 * Refresh the FileTime stamp after the model's own write lands on disk.
 	 * Call this from the tool_result handler so the next checkEdit on the same
 	 * file doesn't see "file_modified" caused by our own previous edit.
+	 * A deferred writer passes the `branchEpoch` it captured before awaiting;
+	 * a write from before a `/tree` is then not credited (#3521).
 	 */
-	recordWritten(rawFilePath: string): void {
+	recordWritten(rawFilePath: string, opts?: { branchEpoch?: number }): void {
+		if (
+			opts?.branchEpoch !== undefined &&
+			opts.branchEpoch !== this.branchEpoch
+		) {
+			incrementDegradationCount({
+				kind: "read-guard-write-after-branch-move",
+				subject: "recordWritten",
+				reason: `a write captured at branch epoch ${opts.branchEpoch} landed at ${this.branchEpoch}; not credited to the new branch`,
+			});
+			return;
+		}
 		const filePath = this.key(rawFilePath);
 		this.unchangedThisSession.delete(filePath);
 		// #1668 review F1: index by the existence-independent syntactic key
@@ -1552,7 +1571,13 @@ export class ReadGuard {
 		// #3520 owns deleting this fallback; until then a write made on the
 		// abandoned branch must not read as authored on this one.
 		this.sessionStartMs = Date.now();
+		this.branchEpoch += 1;
 		return result;
+	}
+
+	/** The epoch a deferred writer captures before it awaits (#3521). */
+	get currentBranchEpoch(): number {
+		return this.branchEpoch;
 	}
 
 	/**

@@ -255,6 +255,8 @@ export interface ObservedReplayEntry {
 	editRanges?: [number, number][];
 	consumer?: string;
 	provenance?: "observed" | "settled-sweep";
+	/** #3521: see `BridgeMutationEntry.readGuardBranchEpoch`. */
+	readGuardBranchEpoch?: number;
 }
 
 /** How a caller hands an observed change back to the pipeline. */

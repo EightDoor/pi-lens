@@ -48,7 +48,12 @@ change.
   changes the file between any two steps. With `ExtPhases` it can land inside
   a tool call.
 - **The deferred `agent_end` format drain**: rewrites the file, then calls
-  `recordWritten` (`runtime-agent-end.ts`).
+  `recordWritten` (`runtime-agent-end.ts`). With `DrainMode = "atomic"` it
+  runs inside the turn boundary. With `"unfenced"` or `"fenced"` it is queued
+  at `Settle` (pi's `agent_settled`, when pi already accepts `/tree`) with
+  the branch epoch it captured, and lands in `Drain`, possibly after a
+  `/tree`. `"fenced"` (the code since #3521 review F1) refuses its
+  `recordWritten` once a `/tree` bumped the epoch.
 - **Boundaries**:
   - user turn;
   - `/new` (a fresh guard);
@@ -73,8 +78,9 @@ The current code is `HandlerEvidence = FALSE`, `CreationHandlerEvidence =
 TRUE`, `RecordAuthoritative = TRUE`, `RecordOwnEdit = TRUE`,
 `OwnEditSkipsReloc = TRUE`, `MtimeAuthored = TRUE`, `OwnEditRescue = TRUE`,
 `BranchFilter = TRUE`, `SuppressByNewerContext = TRUE`, `FormatStamp = TRUE`,
-`SpanSnapshot = FALSE`, `RelocFromLatest = FALSE`, `ForkAtBoundary = FALSE`.
-`ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
+`SpanSnapshot = FALSE`, `RelocFromLatest = FALSE`, `ForkAtBoundary = FALSE`,
+`DrainMode = "fenced"` (every config before #3521 round 2 keeps `"atomic"`,
+its old shape). `ForkImport` is read only when `BranchFilter = FALSE`; the code before #3521
 was `ForkImport = FALSE` (the fork imported nothing), not `TRUE` as this file
 used to say.
 A config that turns one of these off either names the bug it isolates (for
@@ -117,7 +123,9 @@ loaded machine (load average about 6-8 on 4 cores): 80 s for the 30 configs
 before #3521 (82 s wall at `-workers 2`), `NewSession` the slowest at 14 s.
 With #3521's eight configs and the deterministic `-workers 1` (#3517), the
 36 configs took 164 s one after another at load average about 4-6; the
-#3521 configs were 56 s of that, `TreeFilterExt` the slowest at 21 s.
+#3521 configs were 56 s of that, `TreeFilterExt` the slowest at 21 s. The
+three drain configs of #3521 round 2 took 13 s, 4 s and 4 s at load average
+about 45.
 
 `Guarded` runs at three agent ops to fit CI's `TLA+ models` budget (#3572).
 At three ops, every mutant keeps its verdict and the #3523 flip still flips.
@@ -156,6 +164,9 @@ head that added this model. It is not checked in CI.
 | `ForkFilter` | #3521 fixed: `/fork` | pass | 50,036 |
 | `ForkFilterUnhashed` | #3521 fixed at `/fork` without hashes | pass | 1,150 |
 | `ForkDropsReads` | `BranchFilter = FALSE`, `ForkImport = FALSE` (the code before #3521: the fork imports nothing) | violated `NoFalseBlock` | 876 |
+| `TreeDrainFenced` | #3521 review F1 fixed: the settle drain lands after a `/tree` and its stamp is refused | pass | 132,248 |
+| `TreeDrainUnfenced` | the same, stamp credited (the code before round 2) | violated `NoBlindAllow` | 2,457 |
+| `TreeDrainFencedMtime` | the fenced drain with the #3520 mtime fallback: the formatter write postdates the re-anchor (residual until #3520) | violated `NoBlindAllow` | 2,457 |
 | `ContextSuppress`, `SpanAcrossReads` | #3522 | violated `NoStaleAllow` | 2,905 / 2,964 |
 | `UnhashedOwnEditRescue`, `UnhashedFormatStamp` | #3525 | violated `NoStaleAllow` | 449 / 160 |
 
@@ -211,3 +222,11 @@ configs through the real `handleToolCall` / `handleToolResult`, with pi's real
   snapshot check already refuses a hashed stale edit and the unhashed
   configs turn the rescue off; `tests/clients/read-guard-branch.test.ts`
   pins it on the code.
+- `SettleDue` keeps every boundary out until `Settle` has captured the
+  branch epoch: pi marks the run inactive and then invokes the
+  `agent_settled` handlers, so pi-lens's handler captures before any `/tree`
+  can land. An extension whose `agent_settled` handler runs before
+  pi-lens's and awaits long enough for a `/tree` breaks that ordering, and
+  the drain's stamp is then credited (mutating the gate away violates
+  `TreeDrainFenced`). The settled sweep is one more deferred writer with the
+  same fence; the model's drain stands for both.

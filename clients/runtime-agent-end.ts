@@ -87,6 +87,13 @@ interface AgentEndDeps {
 	 * fall back to today's "claim everything" behavior.
 	 */
 	currentSessionId?: string;
+	/**
+	 * #3521: the read guard's branch epoch captured while the run was still
+	 * active. A `/tree` can run while this drain awaits, and a write credited
+	 * after it would vouch for a file the new branch never showed. Omitted:
+	 * captured here, before the first await.
+	 */
+	readGuardBranchEpoch?: number;
 	/** Test/override hook for {@link DEFERRED_FORMAT_STALE_AFTER_MS}. */
 	staleAfterMs?: number;
 }
@@ -140,6 +147,7 @@ export async function handleAgentEnd({
 	ruffClient,
 	getAutofixClients,
 	currentSessionId,
+	readGuardBranchEpoch,
 	staleAfterMs = DEFERRED_FORMAT_STALE_AFTER_MS,
 }: AgentEndDeps): Promise<AgentEndFormatSummary | undefined> {
 	// #791: ownership-filtered drain — records queued by a DIFFERENT known
@@ -150,6 +158,8 @@ export async function handleAgentEnd({
 	// run while the drain awaits its formatter, and nothing aborts the drain
 	// then, so every write into session state below goes through this handle.
 	const session = runtime.captureSessionGeneration();
+	const branchEpoch =
+		readGuardBranchEpoch ?? runtime.readGuard.currentBranchEpoch;
 	const { claimed, staleClaimed, deferredToOwner, droppedOrphans } =
 		runtime.claimDeferredMutations(
 			currentSessionId,
@@ -479,7 +489,7 @@ export async function handleAgentEnd({
 						dbg,
 					});
 					if (!getFlag("no-read-guard"))
-						runtime.readGuard.recordWritten(changedPath);
+						runtime.readGuard.recordWritten(changedPath, { branchEpoch });
 					const content = nodeFs.readFileSync(changedPath, "utf-8");
 					cacheManager.addModifiedRange(
 						changedPath,
@@ -807,7 +817,7 @@ export async function handleAgentEnd({
 						dbg,
 					});
 					if (!getFlag("no-read-guard")) {
-						runtime.readGuard.recordWritten(filePath);
+						runtime.readGuard.recordWritten(filePath, { branchEpoch });
 					}
 					try {
 						const content = nodeFs.readFileSync(filePath, "utf-8");
@@ -1030,7 +1040,12 @@ export async function handleAgentEnd({
 					source: "autofix",
 					runtime,
 					cacheManager,
-					readGuard: getFlag("no-read-guard") ? undefined : runtime.readGuard,
+					readGuard: getFlag("no-read-guard")
+						? undefined
+						: {
+								recordWritten: (filePath: string) =>
+									runtime.readGuard.recordWritten(filePath, { branchEpoch }),
+							},
 					recordAutofix: getFlag("lens-turn-summary")
 						? (filePath) =>
 								runtime.turnSummary.recordAutofix(filePath, {

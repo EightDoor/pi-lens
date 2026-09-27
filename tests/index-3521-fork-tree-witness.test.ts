@@ -554,6 +554,35 @@ describe("#3521 /tree keeps only the reads on the new branch", () => {
 		expect(await c.editLine("post_a", a, 2, "Y", false)).toBe("ALLOW");
 	});
 
+	it("wipes a live concurrent secondary's read on a primary /tree (accepted residual, #3521 F2)", async () => {
+		// Pinned so a later fix flips it deliberately: the read guard is the
+		// module-level runtime's, shared with an in-process subagent, and the
+		// primary's retainBranch drops every id its own branch lacks. The cost
+		// is one re-read in the subagent, never an allow.
+		const primary = conversation(
+			await startRuntime(SessionManager.inMemory(cwd)),
+		);
+		const p1 = primary.user("primary prompt 1");
+		primary.done();
+		primary.user("primary prompt 2");
+		primary.done();
+		const secondary = conversation(
+			await startRuntime(SessionManager.inMemory(cwd)),
+		);
+		const f = fixture("f.conf", 6);
+		secondary.user("subagent prompt");
+		await secondary.read("sub_read_f", f);
+		expect(await secondary.editLine("sub_edit_pre", f, 2, "Y", false)).toBe(
+			"ALLOW",
+		);
+
+		await primary.S().navigateTree(p1);
+
+		expect(await secondary.editLine("sub_edit_post", f, 3, "Y", false)).toEqual(
+			ZERO_READ,
+		);
+	});
+
 	it("leaves the primary's guard alone when a concurrent secondary moves its own tree (A12)", async () => {
 		const primary = conversation(
 			await startRuntime(SessionManager.inMemory(cwd)),
@@ -573,6 +602,54 @@ describe("#3521 /tree keeps only the reads on the new branch", () => {
 		await secondary.S().navigateTree(s1);
 
 		expect(await primary.editLine("post_b", b, 2, "Y", false)).toBe("ALLOW");
+	});
+});
+
+describe("#3521 a /tree during agent_settled work gets no credit from it (shape 22)", () => {
+	// pi marks the run inactive BEFORE it awaits the agent_settled handlers,
+	// so navigateTree can run while pi-lens's settled sweep is replaying
+	// drift into the read guard. Review F1 (probe-settled-race): the replay's
+	// `recordWritten` landed after `retainBranch` cleared the authored set and
+	// a zero-read edit on the new branch was ALLOWED.
+	async function settledThenTree(race: boolean): Promise<string> {
+		const runtime = await startRuntime(SessionManager.inMemory(cwd));
+		const c = conversation(runtime);
+		const f = fixture("f.conf", 6);
+		c.user("prompt 1");
+		c.done();
+		const u2 = c.user("prompt 2 on branch X");
+		await c.read("call_read_f", f);
+		c.done();
+		// A first settle baselines the observed ledger for the tracked file.
+		await runtime.session.extensionRunner.emit({
+			type: "agent_settled",
+		} as never);
+		// A third-party write after the read: the drift the sweep replays.
+		const lines = fs.readFileSync(f, "utf8").split("\n");
+		lines[1] = "EXTERNAL";
+		writeNow(f, lines.join("\n"));
+		if (race) {
+			const settled = runtime.session.extensionRunner.emit({
+				type: "agent_settled",
+			} as never);
+			await c.S().navigateTree(u2);
+			await settled;
+		} else {
+			await runtime.session.extensionRunner.emit({
+				type: "agent_settled",
+			} as never);
+			await c.S().navigateTree(u2);
+		}
+		// Branch Y never read f.conf.
+		return c.editLine("post_f", f, 4, "Y", false);
+	}
+
+	it("does not credit a settled-sweep replay that lands after the /tree", async () => {
+		expect(await settledThenTree(true)).toEqual(ZERO_READ);
+	});
+
+	it("blocks the same edit when the settle finishes before the /tree", async () => {
+		expect(await settledThenTree(false)).toEqual(ZERO_READ);
 	});
 });
 

@@ -584,10 +584,11 @@ describe("#2430 item 3 — the settled sweep is wired ahead of the deferred drai
 			path.join(import.meta.dirname, "..", "..", "index.ts"),
 			"utf-8",
 		);
+		// #3521: both now take the settle's branch epoch as a second argument.
 		const sweepAt = indexSource.indexOf(
-			"await runObservedSettledSweepSafely(ctx)",
+			"await runObservedSettledSweepSafely(ctx, ",
 		);
-		const drainAt = indexSource.indexOf("await runDeferredMutationDrain(ctx)");
+		const drainAt = indexSource.indexOf("await runDeferredMutationDrain(ctx, ");
 		const refreshAt = indexSource.indexOf(
 			"await refreshObservedLedgerSafely(ctx)",
 		);

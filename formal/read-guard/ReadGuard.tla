@@ -77,6 +77,9 @@ CONSTANTS
     RelocFromLatest,     \* relocate only from a read that is the agent's latest view of every line
     ForkAtBoundary,      \* fork/tree: forget reads made after the fork point
     BranchFilter,        \* TRUE (code since #3521): fork/tree keep the branch's records whole, clear FileTime, written, pendCreate and the own-edit rescue, and re-anchor born
+    DrainMode,           \* "atomic": the format drain runs inside Turn (no /tree can interleave);
+                         \* "unfenced": it is queued at settle and may land after a /tree (code before #3521 round 2);
+                         \* "fenced": the same, and its recordWritten is refused once a /tree moved the branch (code)
     \* ---- existing guards (FALSE = mutant with the guard removed) ----
     FileTimeCheck, CoverageCheck, SnapshotCheck
 
@@ -106,13 +109,14 @@ VARIABLES
     know, kTurn,                \* agent knowledge; knowledge before the current prompt
     reads, ft, written, pendCreate, lastEditOk, born, turnNo,  \* guard state
     pc, pend, ops, ext, nb, fixedTurn, mutatedTurn,
+    dr,                         \* settle drain: queued (q), branch epoch it captured (ep), current epoch (cur)
     staleAllow, blindAllow, falseBlock  \* ghost verdict flags
 
 vars == <<disk, rev, tok, know, kTurn, reads, ft, written, pendCreate, lastEditOk,
-          born, turnNo, pc, pend, ops, ext, nb, fixedTurn, mutatedTurn,
+          born, turnNo, pc, pend, ops, ext, nb, fixedTurn, mutatedTurn, dr,
           staleAllow, blindAllow, falseBlock>>
 
-guardVars == <<reads, ft, written, pendCreate, lastEditOk, born, turnNo>>
+guardVars == <<reads, ft, written, pendCreate, lastEditOk, born, turnNo, dr>>
 
 \* g = turn the record was made in (ReadRecord.turnIndex); whole = whole-file view.
 Rec(lo, hi, h, prov) == [lo |-> lo, hi |-> hi, h |-> h, prov |-> prov, g |-> turnNo, whole |-> FALSE]
@@ -124,6 +128,7 @@ Init ==
     /\ lastEditOk = FALSE /\ born = 0 /\ turnNo = 0
     /\ pc = "idle" /\ pend = [k |-> "none"] /\ ops = 0 /\ ext = 0 /\ nb = 0
     /\ fixedTurn = FALSE /\ mutatedTurn = FALSE
+    /\ dr = [q |-> FALSE, ep |-> 0, cur |-> 0]
     /\ staleAllow = FALSE /\ blindAllow = FALSE /\ falseBlock = FALSE
 
 KnowAll(c) == [l \in Lines |-> IF l <= Len(c) THEN c[l] ELSE 0]
@@ -242,7 +247,7 @@ ReadCall(full, lo, hi) ==
     /\ pc' = "readExec" /\ pend' = [k |-> "read", full |-> full, lo |-> lo, hi |-> hi]
     /\ ops' = ops + 1
     /\ UNCHANGED <<disk, rev, tok, know, kTurn, written, pendCreate, born, turnNo,
-                   ext, nb, fixedTurn, mutatedTurn, staleAllow, blindAllow, falseBlock>>
+                   ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 \* host read: the bytes delivered to the agent.
 ReadExec ==
@@ -279,7 +284,7 @@ ReadResult ==
     /\ lastEditOk' = FALSE
     /\ pc' = "idle" /\ pend' = [k |-> "none"]
     /\ UNCHANGED <<disk, rev, tok, kTurn, written, pendCreate, born, turnNo,
-                   ops, ext, nb, fixedTurn, mutatedTurn, staleAllow, blindAllow, falseBlock>>
+                   ops, ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 \* ---- positional edit of lo..lo+span-1 (checkEdit at tool_call, host apply) ----
 Edit(lo, span) ==
@@ -321,7 +326,7 @@ Edit(lo, span) ==
                     /\ lastEditOk' = (v.act # "block")
                     /\ pc' = "idle"
     /\ ops' = ops + 1
-    /\ UNCHANGED <<kTurn, ft, written, pendCreate, born, turnNo, ext, nb, fixedTurn>>
+    /\ UNCHANGED <<kTurn, ft, written, pendCreate, born, turnNo, ext, nb, fixedTurn, dr>>
 
 \* tool_result of the edit: recordWritten (FileTime from disk now).
 EditRW ==
@@ -336,7 +341,7 @@ EditRW ==
                      ELSE r0
     /\ pc' = "idle" /\ pend' = [k |-> "none"]
     /\ UNCHANGED <<disk, rev, tok, know, kTurn, lastEditOk, born, turnNo, ops, ext,
-                   nb, fixedTurn, mutatedTurn, staleAllow, blindAllow, falseBlock>>
+                   nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 \* ---- write (whole file) ----
 Write ==
@@ -348,7 +353,7 @@ Write ==
     /\ pendCreate' = TRUE                              \* noteCreatedFile at tool_call
     /\ pc' = "writeRW1" /\ ops' = ops + 1 /\ mutatedTurn' = TRUE
     /\ UNCHANGED <<kTurn, reads, ft, written, lastEditOk, born, turnNo, ext, nb,
-                   fixedTurn, staleAllow, blindAllow, falseBlock>>
+                   fixedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 \* recordWritten before the pipeline: stamps FileTime, injects the creation read.
 WriteRW1 ==
@@ -362,7 +367,7 @@ WriteRW1 ==
     /\ pc' = IF FixKind # "none" /\ ~fixedTurn THEN "fix" ELSE "idle"
     /\ pend' = IF FixKind # "none" /\ ~fixedTurn THEN pend ELSE [k |-> "none"]
     /\ UNCHANGED <<disk, rev, tok, know, kTurn, lastEditOk, born, turnNo, ops, ext,
-                   nb, fixedTurn, mutatedTurn, staleAllow, blindAllow, falseBlock>>
+                   nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 \* The turn's first write: immediate autofix rewrites line 1.
 Fix ==
@@ -386,7 +391,7 @@ WriteRW2 ==
                   ELSE reads
     /\ pc' = "idle" /\ pend' = [k |-> "none"]
     /\ UNCHANGED <<disk, rev, tok, kTurn, pendCreate, lastEditOk, born, turnNo, ops,
-                   ext, nb, fixedTurn, mutatedTurn, staleAllow, blindAllow, falseBlock>>
+                   ext, nb, fixedTurn, mutatedTurn, dr, staleAllow, blindAllow, falseBlock>>
 
 ----------------------------------------------------------------------------
 \* Another writer (external editor, second pi-lens instance, git checkout).
@@ -400,10 +405,15 @@ External ==
     /\ UNCHANGED <<know, kTurn, guardVars, pc, pend, ops, nb, fixedTurn, mutatedTurn,
                    staleAllow, blindAllow, falseBlock>>
 
+\* A settle drain is due: the run wrote, and agent_settled has not queued it yet.
+SettleDue == DrainMode # "atomic" /\ FormatDrain # "none" /\ mutatedTurn
+
 \* A user turn boundary: agent_end's deferred format drain, then the next prompt.
+\* With DrainMode # "atomic" the drain is queued at Settle instead and lands
+\* in Drain, which the conversation can have moved past.
 Turn ==
-    /\ Idle /\ "turn" \in Bounds /\ nb < MaxBounds
-    /\ IF FormatDrain # "none" /\ mutatedTurn /\ ModOk(FormatDrain, disk, 1)
+    /\ Idle /\ "turn" \in Bounds /\ nb < MaxBounds /\ ~SettleDue
+    /\ IF DrainMode = "atomic" /\ FormatDrain # "none" /\ mutatedTurn /\ ModOk(FormatDrain, disk, 1)
          THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
               /\ IF FormatStamp                               \* recordWritten after the format
                    THEN ft' = rev + 1 /\ written' = TRUE
@@ -411,8 +421,36 @@ Turn ==
          ELSE UNCHANGED <<disk, rev, tok, ft, written>>
     /\ kTurn' = know /\ turnNo' = turnNo + 1
     /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE /\ nb' = nb + 1
-    /\ UNCHANGED <<know, reads, pendCreate, lastEditOk, born, pc, pend, ops, ext,
+    /\ UNCHANGED <<know, reads, pendCreate, lastEditOk, born, pc, pend, ops, ext, dr,
                    staleAllow, blindAllow, falseBlock>>
+
+\* agent_settled (#3521 review F1): the run is over but the next prompt has not
+\* come, and pi already accepts /tree. The drain for this turn's writes is
+\* queued with the branch epoch it captured. pi marks the run inactive and
+\* then invokes the handlers, so pi-lens's handler captures the epoch before
+\* any /tree can land (SettleDue gates the boundaries below); an earlier
+\* extension's handler that awaits first is not modelled (README Limits).
+Settle ==
+    /\ Idle /\ SettleDue /\ ~dr.q
+    /\ dr' = [dr EXCEPT !.q = TRUE, !.ep = dr.cur]
+    /\ mutatedTurn' = FALSE
+    /\ UNCHANGED <<disk, rev, tok, know, kTurn, reads, ft, written, pendCreate, lastEditOk,
+                   born, turnNo, pc, pend, ops, ext, nb, fixedTurn,
+                   staleAllow, blindAllow, falseBlock>>
+
+\* The queued drain lands: the formatter rewrites line 1, then recordWritten.
+\* "fenced" refuses the stamp when a /tree bumped the epoch since Settle.
+Drain ==
+    /\ Idle /\ dr.q
+    /\ dr' = [dr EXCEPT !.q = FALSE]
+    /\ IF ModOk(FormatDrain, disk, 1)
+         THEN /\ disk' = Mod(FormatDrain, disk, 1, tok) /\ rev' = rev + 1 /\ tok' = tok + 1
+              /\ IF FormatStamp /\ (DrainMode = "unfenced" \/ dr.ep = dr.cur)
+                   THEN ft' = rev + 1 /\ written' = TRUE
+                   ELSE UNCHANGED <<ft, written>>
+         ELSE UNCHANGED <<disk, rev, tok, ft, written>>
+    /\ UNCHANGED <<know, kTurn, reads, pendCreate, lastEditOk, born, turnNo, pc, pend,
+                   ops, ext, nb, fixedTurn, mutatedTurn, staleAllow, blindAllow, falseBlock>>
 
 FreshGuard ==
     /\ ft' = -1 /\ written' = FALSE /\ pendCreate' = FALSE /\ lastEditOk' = FALSE
@@ -420,10 +458,11 @@ FreshGuard ==
 
 \* /new: fresh guard, empty conversation.
 New ==
-    /\ Idle /\ "new" \in Bounds /\ nb < MaxBounds
+    /\ Idle /\ "new" \in Bounds /\ nb < MaxBounds /\ ~SettleDue
     /\ reads' = <<>> /\ FreshGuard /\ UNCHANGED turnNo
     /\ know' = [l \in Lines |-> 0] /\ kTurn' = know'
     /\ nb' = nb + 1 /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE
+    /\ dr' = [dr EXCEPT !.q = FALSE]          \* the session generation drops the old drain (#3528)
     /\ UNCHANGED <<disk, rev, tok, pc, pend, ops, ext, staleAllow, blindAllow, falseBlock>>
 
 \* /fork: the conversation restarts before the current prompt (kTurn).
@@ -434,7 +473,7 @@ New ==
 Kept(S) == SelectSeq(S, AllHashesMatch)
 BeforePrompt(r) == r.g < turnNo
 Fork ==
-    /\ Idle /\ "fork" \in Bounds /\ nb < MaxBounds
+    /\ Idle /\ "fork" \in Bounds /\ nb < MaxBounds /\ ~SettleDue
     /\ IF BranchFilter
          THEN /\ reads' = SelectSeq(reads, BeforePrompt)
               /\ ft' = -1
@@ -446,6 +485,7 @@ Fork ==
     /\ written' = FALSE /\ pendCreate' = FALSE /\ lastEditOk' = FALSE /\ born' = rev
     /\ know' = kTurn
     /\ nb' = nb + 1 /\ fixedTurn' = FALSE /\ mutatedTurn' = FALSE
+    /\ dr' = [dr EXCEPT !.q = FALSE]          \* the session generation drops the old drain (#3528)
     /\ UNCHANGED <<disk, rev, tok, kTurn, pc, pend, ops, ext, staleAllow, blindAllow, falseBlock>>
 
 \* /tree: the conversation moves to an earlier point in the same activation.
@@ -454,15 +494,16 @@ Fork ==
 \* writtenThisSession, pending creations and the edit history, and re-anchor
 \* the mtime fallback. Without it (the code before #3521), no handler.
 Tree ==
-    /\ Idle /\ "tree" \in Bounds /\ nb < MaxBounds
+    /\ Idle /\ "tree" \in Bounds /\ nb < MaxBounds /\ ~SettleDue
     /\ know' = kTurn
     /\ IF BranchFilter
          THEN /\ reads' = SelectSeq(reads, BeforePrompt)
               /\ ft' = -1 /\ written' = FALSE /\ pendCreate' = FALSE
               /\ lastEditOk' = FALSE /\ born' = rev
+              /\ dr' = [dr EXCEPT !.cur = dr.cur + 1]      \* the branch epoch
          ELSE /\ reads' = IF ForkAtBoundary THEN SelectSeq(reads, BeforePrompt) ELSE reads
               /\ written' = IF ForkAtBoundary THEN FALSE ELSE written   \* writtenThisSession
-              /\ UNCHANGED <<ft, pendCreate, lastEditOk, born>>
+              /\ UNCHANGED <<ft, pendCreate, lastEditOk, born, dr>>
     /\ UNCHANGED turnNo
     /\ nb' = nb + 1
     /\ UNCHANGED <<disk, rev, tok, kTurn,
@@ -476,7 +517,7 @@ Next ==
     \/ \E lo \in 1..MaxLen, s \in Spans : Edit(lo, s)
     \/ EditRW
     \/ Write \/ WriteRW1 \/ Fix \/ WriteRW2
-    \/ External \/ Turn \/ New \/ Fork \/ Tree
+    \/ External \/ Turn \/ Settle \/ Drain \/ New \/ Fork \/ Tree
 
 Spec == Init /\ [][Next]_vars
 

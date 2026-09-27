@@ -1549,13 +1549,24 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"would add a second timer per target.",
 		owner: "#2523 slice 3",
 	},
-	"index.ts#0aa50b6e~d0186439": {
+	"index.ts#037ff762~80c6c04d": {
 		family: "hook-await",
 		site: "agent_settled",
 		reason:
 			"`onAgentSettled` awaits its three phases in sequence with no " +
 			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance.",
+			"per-phase allowance. #3521 re-keyed it: the sweep now takes " +
+			"the settle's branch epoch.",
+		owner: "#2523 slice 2",
+	},
+	"index.ts#03f9a37d~c085098b": {
+		family: "hook-await",
+		site: "agent_settled",
+		reason:
+			"`onAgentSettled` awaits its three phases in sequence with no " +
+			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
+			"per-phase allowance. #3521 re-keyed it: the drain now takes " +
+			"the settle's branch epoch.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#1946ceb9~8beff560": {
@@ -1584,15 +1595,6 @@ const EXEMPT_SITES: Readonly<Record<string, SweepExemption>> = {
 			"(index.ts:3138). Its `getAutofixClients` closure is the " +
 			"`loadBootstrapClients()` #2523 names under agent_settled; " +
 			"runtime-agent-end.ts:347 is the consumer.",
-		owner: "#2523 slice 2",
-	},
-	"index.ts#2c2d49c9~adf2e1af": {
-		family: "hook-await",
-		site: "agent_settled",
-		reason:
-			"`onAgentSettled` awaits its three phases in sequence with no " +
-			"aggregate bound; the 10000ms budget is a TOTAL, not a " +
-			"per-phase allowance.",
 		owner: "#2523 slice 2",
 	},
 	"index.ts#2ccc914e~d8df7429": {

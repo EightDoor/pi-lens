@@ -2706,8 +2706,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// #3521: `/tree` moves the conversation inside this activation. Keep only
 	// the reads whose tool result is on the new branch. A concurrent secondary
 	// shares the module-level runtime, so its tree moves never touch the
-	// primary's guard. `session_before_tree` can still be cancelled by a later
-	// handler, so nothing happens there.
+	// primary's guard; the other direction is an accepted residual (#3521 F2):
+	// a primary /tree clears a live secondary's reads, costing it one re-read.
+	// `session_before_tree` can still be cancelled by a later handler, so
+	// nothing happens there.
 	(pi as any).on(
 		"session_tree",
 		wrapSessionEventHandler(
@@ -3028,6 +3030,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	 */
 	async function runObservedSettledSweepSafely(
 		ctx: DeferredDrainCtx,
+		readGuardBranchEpoch: number,
 	): Promise<void> {
 		const cwd = ctx.cwd ?? runtime.projectRoot;
 		try {
@@ -3039,7 +3042,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 						cwd,
 						limit: OBSERVED_TRACKED_MAX_FILES,
 					}),
-				record: replayThroughMutationBridge,
+				// #3521: a /tree can land while the sweep awaits; the replayed
+				// write then must not vouch for a file the new branch never showed.
+				record: (entry) =>
+					replayThroughMutationBridge({ ...entry, readGuardBranchEpoch }),
 				getStoredLineHashes: (candidate) =>
 					storedLineHashesFor(runtime.readGuard, candidate),
 				// Merge of #2449 into #2450: #2449 wrote this gate as the
@@ -3098,6 +3104,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 
 	async function runDeferredMutationDrain(
 		ctx: DeferredDrainCtx,
+		readGuardBranchEpoch: number,
 	): Promise<void> {
 		const currentSessionId = getStableSessionId(ctx);
 		// #791 defense-in-depth: mirrors how session_start already skips
@@ -3139,6 +3146,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				return { biomeClient, ruffClient };
 			},
 			currentSessionId,
+			readGuardBranchEpoch,
 		});
 		if (ctx.ui?.setStatus && ctx.ui.theme) {
 			updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
@@ -3604,6 +3612,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 	}
 	const onAgentSettled = async (_event: unknown, ctx: DeferredDrainCtx) => {
 		if (!lensEnabled) return;
+		// #3521: pi marks the run inactive before it awaits this handler, so a
+		// /tree can land while the sweep and drain below await. Captured before
+		// the first await: their writes from before the move are not credited.
+		const settleBranchEpoch = runtime.readGuard.currentBranchEpoch;
 		// Keep the activation-owned live ctx current for the detached delivery
 		// task. It must probe idleness and append through this run's host seam.
 		rememberOwnEventCtx(ctx);
@@ -3635,8 +3647,8 @@ function activateExtension(hostPi: ExtensionAPI) {
 				// widget diagnostic files, open LSP documents — and never walks the
 				// workspace. Bounded on both axes (timeout + this ctx's abort) and
 				// wrapped, because an advisory sweep must never cost the drain.
-				await runObservedSettledSweepSafely(ctx);
-				await runDeferredMutationDrain(ctx);
+				await runObservedSettledSweepSafely(ctx, settleBranchEpoch);
+				await runDeferredMutationDrain(ctx, settleBranchEpoch);
 				// The drain just wrote formatted/autofixed bytes to files pi-lens
 				// itself owns. Re-baseline them, or the NEXT settle reads our own
 				// formatter output as unexplained third-party drift and requeues the

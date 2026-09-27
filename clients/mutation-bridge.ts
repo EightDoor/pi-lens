@@ -84,7 +84,12 @@ export interface MutationBridgeDeps {
 	getRuntime(): {
 		turnIndex: number;
 		telemetrySessionId?: string;
-		readGuard?: { recordWritten?: (filePath: string) => void };
+		readGuard?: {
+			recordWritten?: (
+				filePath: string,
+				opts?: { branchEpoch?: number },
+			) => void;
+		};
 		recordProjectMutation?: (args: {
 			filePath: string;
 			source: ProjectChangeSource;
@@ -264,7 +269,12 @@ export function recordMutationThroughSeam(
 		//    `isRecordable` check above already passed, so the write itself is
 		//    still bookkept below whether or not the stamp fires.
 		if (deps.shouldStampReadGuard?.() ?? true) {
-			runtime.readGuard?.recordWritten?.(filePath);
+			runtime.readGuard?.recordWritten?.(
+				filePath,
+				entry.readGuardBranchEpoch === undefined
+					? undefined
+					: { branchEpoch: entry.readGuardBranchEpoch },
+			);
 		}
 
 		// 2. Turn state: this is the insert that leaves `turn-state.json` `files`

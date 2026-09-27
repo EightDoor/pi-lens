@@ -889,6 +889,12 @@ export interface BridgeMutationEntry {
 	 * falls back to `"bridge"`.
 	 */
 	provenance?: "observed" | "settled-sweep";
+	/**
+	 * #3521: the read guard's branch epoch the producer captured before it
+	 * awaited (the agent_settled sweep). A `/tree` in between means the write
+	 * is not credited to the new branch. Absent: the write is current.
+	 */
+	readGuardBranchEpoch?: number;
 }
 
 /**

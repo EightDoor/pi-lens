@@ -2281,3 +2281,232 @@ describe("runtime-agent-end deferred formatting", () => {
 		});
 	});
 });
+
+// #3521 review F1 (catalog shape 22): pi marks the run inactive before it
+// awaits the agent_settled handlers, so a /tree can land while this drain
+// awaits a formatter, an autofix client or an LSP quick fix. The drain's
+// `recordWritten` must then not credit the file to the new branch. Each case
+// moves the branch from INSIDE the awaited writer, the way the host
+// interleaves, and backdates the written file so the pre-#3520 mtime
+// fallback (a separate, named residual) cannot answer instead of the fence.
+describe("runtime-agent-end deferred writes across a /tree (#3521)", () => {
+	const LONG_AGO = new Date("2000-01-01T00:00:00Z");
+	const settle = (filePath: string, content: string) => {
+		fs.writeFileSync(filePath, content);
+		fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+	};
+	const zeroRead = (runtime: RuntimeCoordinator, filePath: string) =>
+		runtime.readGuard.checkEdit(filePath, [1, 1]).action;
+
+	afterEach(async () => {
+		await cleanupTestEnvironmentsDrained("pi-lens-agent-end-branch-");
+	});
+
+	for (const moved of [true, false]) {
+		it(`${moved ? "does not credit" : "credits"} a deferred format write ${moved ? "that lands after" : "with no"} /tree`, async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-branch-fmt-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const filePath = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferFormat(filePath, env.tmpDir, "edit", env.tmpDir);
+				const { getDegradationSummary, resetDegradationLedger } =
+					await import("../../clients/degradation-ledger.js");
+				resetDegradationLedger();
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: () => {},
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: () => {} } as any,
+					getFormatService: () =>
+						({
+							recordRead: () => {},
+							formatFile: async (fp: string) => {
+								if (moved) runtime.readGuard.retainBranch(new Set());
+								settle(fp, "const x = 1;\n");
+								return {
+									filePath: fp,
+									formatters: [{ name: "biome", success: true, changed: true }],
+									anyChanged: true,
+									allSucceeded: true,
+								};
+							},
+						}) as any,
+				});
+				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
+				// The refused write leaves one counted, discriminating record.
+				expect(
+					getDegradationSummary().find(
+						(group) => group.kind === "read-guard-write-after-branch-move",
+					)?.count,
+				).toBe(moved ? 1 : undefined);
+				// The move is branch-scoped: the session's change log keeps the
+				// drain's record either way.
+				expect(readChangesSince(env.tmpDir, 0)).toMatchObject([
+					{ source: "format", filePath },
+				]);
+			} finally {
+				if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = previousDataDir;
+				env.cleanup();
+			}
+		});
+
+		it(`${moved ? "does not credit" : "credits"} a deferred autofix write ${moved ? "that lands after" : "with no"} /tree`, async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-branch-fix-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"src/app.ts",
+					"let value=1\n",
+				);
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				fs.writeFileSync(path.join(env.tmpDir, "biome.json"), "{}\n");
+				fs.writeFileSync(
+					path.join(env.tmpDir, "package.json"),
+					JSON.stringify({ devDependencies: { "@biomejs/biome": "^1.0.0" } }),
+				);
+				fs.writeFileSync(
+					path.join(env.tmpDir, "package-lock.json"),
+					JSON.stringify({
+						packages: { "node_modules/@biomejs/biome": { version: "1.0.0" } },
+					}),
+				);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferMutation(
+					filePath,
+					env.tmpDir,
+					"edit",
+					env.tmpDir,
+					"autofix",
+				);
+				const biomeClient = {
+					isSupportedFile: () => true,
+					ensureAvailable: async () => true,
+					fixFileAsync: async (fp: string) => {
+						if (moved) runtime.readGuard.retainBranch(new Set());
+						settle(fp, "const value=1\n");
+						return { success: true, changed: true, fixed: 1 };
+					},
+				};
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					biomeClient: biomeClient as any,
+					ruffClient: {} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it(`${moved ? "does not credit" : "credits"} an actionable-warning quick fix ${moved ? "that lands after" : "with no"} /tree`, async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-branch-aw-");
+			try {
+				const filePath = createTempFile(
+					env.tmpDir,
+					"src/app.ts",
+					"const x = 1;\n",
+				);
+				fs.utimesSync(filePath, LONG_AGO, LONG_AGO);
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.seedProjectSequence(1);
+				const report: ActionableWarningsReport = {
+					generatedAt: new Date().toISOString(),
+					scope: "turn_delta",
+					sessionId: "s1",
+					turnIndex: 1,
+					projectSeqEnd: 1,
+					deltaOnly: true,
+					includeLspCodeActions: true,
+					files: [
+						{
+							filePath,
+							displayPath: "src/app.ts",
+							warnings: [
+								{
+									id: "aw:3521",
+									filePath,
+									displayPath: "src/app.ts",
+									severity: "warning",
+									tool: "typescript",
+									message: "unused var",
+									suppressed: false,
+									origin: "dispatch",
+									actions: [
+										{
+											title: "Remove unused var",
+											hasEdit: true,
+											hasCommand: false,
+											autoFixEligible: true,
+										},
+									],
+								},
+							],
+						},
+					],
+					summary: {
+						warnings: 1,
+						unsuppressed: 1,
+						suppressed: 0,
+						files: 1,
+						actions: 1,
+						autoFixEligible: 1,
+					},
+				};
+				applyConservativeActionableWarningFixesMock.mockImplementationOnce(
+					async (args: {
+						mutationContext: {
+							readGuard?: { recordWritten: (filePath: string) => void };
+						};
+					}) => {
+						if (moved) runtime.readGuard.retainBranch(new Set());
+						settle(filePath, "const x = 2;\n");
+						args.mutationContext.readGuard?.recordWritten(filePath);
+						return {
+							considered: 1,
+							applied: 1,
+							changedFiles: [filePath],
+							skipped: [],
+						};
+					},
+				);
+				await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) =>
+						name === "lens-actionable-warning-autofix" ||
+						name === "lens-actionable-warnings" ||
+						name === "no-lsp",
+					notify: vi.fn(),
+					dbg: vi.fn(),
+					runtime,
+					cacheManager: {
+						readCache: () => ({ data: report }),
+						addModifiedRange: vi.fn(),
+					} as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+				});
+				expect(applyConservativeActionableWarningFixesMock).toHaveBeenCalled();
+				expect(zeroRead(runtime, filePath)).toBe(moved ? "block" : "allow");
+			} finally {
+				applyConservativeActionableWarningFixesMock.mockReset();
+				env.cleanup();
+			}
+		});
+	}
+});
