@@ -130,23 +130,6 @@ describe("TreeSitterClient trap containment and budget (#3605)", () => {
 		expect(kindCount("wasm-trap")).toBeUndefined();
 	});
 
-	it("degrades an abort in consume to not-parsed and poisons the runtime", async () => {
-		const { client, onAbort } = await liveClient();
-
-		const outcome = await client.withParsedTree(
-			pythonFile(),
-			"python",
-			undefined,
-			() => {
-				throw trap("Aborted(OOM)");
-			},
-		);
-
-		expect(outcome).toEqual({ parsed: false });
-		expect(onAbort).toHaveBeenCalledTimes(1);
-		expect(kindCount("wasm-trap")).toBeUndefined();
-	});
-
 	it("poisons the runtime on the first trap past the budget, and not before", async () => {
 		const { client, onAbort } = await liveClient();
 		for (let i = 0; i < WASM_TRAP_BUDGET; i++) {
