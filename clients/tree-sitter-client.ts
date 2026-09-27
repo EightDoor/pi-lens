@@ -272,9 +272,9 @@ const WASM_TRAP_MESSAGES = [
  * `undefined`: not a wasm failure.
  */
 export function classifyTreeSitterWasmError(
-	error: unknown,
+	thrown: unknown,
 ): "abort" | "trap" | undefined {
-	const message = error instanceof Error ? error.message : String(error);
+	const message = thrown instanceof Error ? thrown.message : String(thrown);
 	if (message.includes("Aborted") || message.includes("abort()")) {
 		return "abort";
 	}
@@ -282,7 +282,7 @@ export function classifyTreeSitterWasmError(
 	const { WebAssembly } = globalThis as unknown as {
 		WebAssembly: { RuntimeError: new () => Error };
 	};
-	if (error instanceof WebAssembly.RuntimeError) return "trap";
+	if (thrown instanceof WebAssembly.RuntimeError) return "trap";
 	return WASM_TRAP_MESSAGES.some((trap) => message.includes(trap))
 		? "trap"
 		: undefined;
@@ -614,14 +614,14 @@ export class TreeSitterClient {
 	 * budget recycles the parsers and the tree cache, is counted, and returns
 	 * false, so each caller keeps its own non-fatal path (#3605).
 	 */
-	reportWasmAbort(error: unknown): boolean {
-		const failure = classifyTreeSitterWasmError(error);
+	reportWasmAbort(thrown: unknown): boolean {
+		const failure = classifyTreeSitterWasmError(thrown);
 		if (!failure) return false;
-		const message = error instanceof Error ? error.message : String(error);
+		const message = thrown instanceof Error ? thrown.message : String(thrown);
 		if (failure === "trap") {
-			if (typeof error === "object" && error !== null) {
-				if (this.reportedTraps.has(error)) return this.wasmAborted;
-				this.reportedTraps.add(error);
+			if (typeof thrown === "object" && thrown !== null) {
+				if (this.reportedTraps.has(thrown)) return this.wasmAborted;
+				this.reportedTraps.add(thrown);
 			}
 			if (++this.wasmTraps <= WASM_TRAP_BUDGET) {
 				incrementDegradationCount({
