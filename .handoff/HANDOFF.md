@@ -149,3 +149,23 @@ Routine `trig_01MUZ9yybcCCrs27t3DPFVif` ("Process TLA follow-up queue (#3518)", 
 `.claude/worktrees/` holds about 45 agent and push worktrees from this session. None hold uncommitted work that matters: every live branch head is pushed as a real branch or a `wip/` ref.
 - **To clean up:** for each worktree, `rm <wt>/node_modules`, which is a symlink. Never `rm -rf` through it.
 - **Then:** `git worktree remove <wt>`, without `--force` unless it is clean.
+
+---
+
+## 8. Retro backlog (not yet run through `/retro`)
+
+These are candidates, ordered by payoff. The `/retro` contract (`docs/pi-lens-retro.md`) requires each mechanical check to ship with a red transcript on the incident's shape, so run `/retro` on this list rather than applying it directly.
+
+| # | Finding | Evidence | Class | Proposed deliverable |
+|---|---|---|---|---|
+| 1 | The PR-body linter (`scripts/check-pr-body.mjs --lint-local`) passed a body that CI's "Close-keyword syntax" check then rejected. The title said "closes" but the body had no `Closes #N` lines. | #3619's first push | Mechanical | Make the local linter fail when the title closes an issue the body doesn't list |
+| 2 | The same linter checks code citations against the current checkout, not the PR's branch. It gave a false "outside the HEAD tree" warning on #3621. | #3621 body lint | Mechanical | Add a `--ref <sha>` option to the linter |
+| 3 | `.gitignore`'s `*.md` rule silently left the handoff docs out of the first handoff commits. | This branch's history | Mechanical | Add `!.handoff/**` to `.gitignore` |
+| 4 | A property test couldn't catch #3594 item 2's bug. Its log generator (`monotonicLog`) never produces out-of-order entries, and logs written by older released versions can contain them. | `.handoff/reviews/rv3594.md` R2-F1 | Judgement | One line for the AGENTS.md defect list: property-test generators must include the input shapes that older writers produce |
+| 5 | The mutation-test (Stryker) sandbox rewrites source code, which breaks tests that read source text and the MCP startup smoke test. | #3608, #3616 | Mechanical | Already filed as #3616. Optionally, a governance test that bans source-text assertions. |
+| 6 | S9 ignored the orchestrator's pause message: it wasn't posted on the issue, and it conflicted with S9's "do not push" instruction. S9 was right under the rules as written. | `.handoff/s9-status.md`, S9 report | Judgement | A merge-train mistake row: a mid-flight order must say which part of the original instructions it overrides, and be posted on the issue |
+| 7 | The orchestrator said the maintainer had stopped G16, when the harness interrupt had killed it. | Maintainer correction | Judgement | A mistake row: check an agent's status before saying why it stopped |
+| 8 | The orchestrator read "external PR" when the maintainer meant the external issue, and started the wrong agents. | #3605 triage | Judgement | A mistake row: confirm ambiguous targets before starting agents |
+| 9 | A Node exit-listener fix for the test runner was invalid, because vitest stops its workers with SIGTERM and Node fires no `exit` event on a signal. | #3617 | Mechanical | Already filed as #3617 |
+
+Items 1–3 are small, self-contained script and config changes and would be the best return. Items 5 and 9 are already tracked as issues. The rest are one-line entries in the three places `/retro` keeps rules: the AGENTS.md defect list, the role playbooks, and the merge-train mistake table.
