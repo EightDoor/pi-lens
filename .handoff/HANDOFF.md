@@ -44,7 +44,7 @@ Durable copies live on the branch `orchestrator/handoff-2026-09-27` on origin, u
 
 | PR | Group | Head | State / next action |
 |---|---|---|---|
-| **(no PR yet)** | G20 lock-wait (refs #3594) | `f07d73f1c`, **pushed** to `fix/3594-lock-wait` | Items 1 and 3 are verified. Item 2 is withdrawn (see §4). The self-check on a merge with current master passed 154/154. **Next:** open the PR from `.handoff/pr-bodies/fix-3594.md`, title `fix(locks): remembered-holder skip for acquireBoundedPidFileLock (refs #3594)`. The body has no Closes line, which is correct because it is `refs`. Enable auto-merge and subscribe. |
+| **#3621** | G20 lock-wait (refs #3594) | `f07d73f1c` | Opened 09:40 with auto-merge (squash) on; subscribed. Items 1 and 3 are verified; item 2 is withdrawn (see §4). **Next:** drive CI green, and check that Unit and Lint actually run on the head. |
 
 Merged this session:
 - #3602 (G5)
