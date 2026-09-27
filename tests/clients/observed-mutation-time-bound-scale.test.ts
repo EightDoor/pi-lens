@@ -47,24 +47,40 @@ const SOURCE = ["const a = 1;", "const b = 2;", "const c = 3;", ""].join("\n");
 const NAMES = ["a1.ts", "a2.ts", "a3.ts", "a4.ts", "a5.ts"];
 const BOUNDS = ["capture", "settle", "sweep", "turn"] as const;
 type Bound = (typeof BOUNDS)[number];
+/**
+ * One probe per call site that reads a bound, keyed to the bound it reads:
+ * the sweep bound is read by the settled sweep AND the post-drain refresh, so
+ * a site that stopped reading it shows up as its own probe.
+ */
+const PROBES = {
+	capture: "capture",
+	settle: "settle",
+	sweep: "sweep",
+	refresh: "sweep",
+	turn: "turn",
+} as const satisfies Record<string, Bound>;
+type Probe = keyof typeof PROBES;
+const PROBE_NAMES = Object.keys(PROBES) as Probe[];
 /** Every scaled bound below lands under this; every unscaled one above it. */
 const ADVANCE_MS = 20;
 const SCALE = "0.01";
 /**
- * The canary's advance per bound: 1 ms under that bound's unscaled race (the
+ * The canary's advance per probe: 1 ms under that site's unscaled race (the
  * 200 ms capture budget, the 4 x 50 ms settle race, the 2 x 200 ms sweep
  * race), so it passes unscaled and flips under ANY scale the pass can use
  * (below 0.995), not only under 0.01. The turn probe needs no clock.
  */
-const CANARY_ADVANCE_MS: Record<Bound, number> = {
+const CANARY_ADVANCE_MS: Record<Probe, number> = {
 	capture: 199,
 	settle: 199,
 	sweep: 399,
+	refresh: 399,
 	turn: 0,
 };
 
 let env: ReturnType<typeof setupTestEnvironment>;
 let dir: string;
+let files: string[];
 
 beforeEach(() => {
 	resetObservedMutationNet();
@@ -75,7 +91,8 @@ beforeEach(() => {
 	env = setupTestEnvironment("pi-lens-3496-scale-");
 	dir = path.join(env.tmpDir, "target");
 	fs.mkdirSync(dir);
-	for (const name of NAMES) fs.writeFileSync(path.join(dir, name), SOURCE);
+	files = NAMES.map((name) => path.join(dir, name));
+	for (const file of files) fs.writeFileSync(file, SOURCE);
 });
 
 afterEach(() => {
@@ -110,75 +127,75 @@ function arm(toolCallId: string, advanceMs: number) {
 }
 
 /**
- * Arm with the clock never advanced (so no bound can cut the baseline, on any
- * host), change every entry, then settle and advance by `advanceMs`.
+ * Whether the operation `probe` exercises ran to completion, on a fresh net
+ * (repeated arms in one turn would otherwise spend the per-turn budget and
+ * read as the scale's doing).
  */
-async function settle(toolCallId: string, advanceMs: number) {
-	expect(await arm(toolCallId, 0)).toMatchObject({ armed: true });
-	for (const name of NAMES)
-		fs.writeFileSync(path.join(dir, name), `${SOURCE}const d = 4;\n`);
-	return onFakeClock(
-		() =>
-			settleObservedMutation({
-				toolCallId,
-				toolName: "dir_codemod",
-				sessionGeneration: 1,
-				turnIndex: 1,
-				record: () => true,
-			}),
-		advanceMs,
-	);
-}
-
-/** Whether the operation `bound` gates ran to completion. */
 async function completes(
-	bound: Bound,
+	probe: Probe,
 	id: string,
 	advanceMs = ADVANCE_MS,
 ): Promise<boolean> {
-	if (bound === "capture") return (await arm(id, advanceMs)).armed;
-	if (bound === "turn") {
-		_setObservedTurnBudgetForTests(1, OBSERVED_TURN_BUDGET_MS - 3);
-		return (await arm(id, 0)).armed;
+	resetObservedMutationNet();
+	resetMutationAttribution();
+	switch (probe) {
+		case "capture":
+			return (await arm(id, advanceMs)).armed;
+		case "turn":
+			// All but 3 ms of the turn is spent: any scale under 0.995 leaves none.
+			_setObservedTurnBudgetForTests(1, OBSERVED_TURN_BUDGET_MS - 3);
+			return (await arm(id, 0)).armed;
+		case "settle": {
+			// The baseline is taken on a clock that never advances, so no bound
+			// can cut it on any host; only the settle is timed.
+			expect(await arm(id, 0)).toMatchObject({ armed: true });
+			for (const file of files)
+				fs.writeFileSync(file, `${SOURCE}const d = 4;\n`);
+			const settled = await onFakeClock(
+				() =>
+					settleObservedMutation({
+						toolCallId: id,
+						toolName: "dir_codemod",
+						sessionGeneration: 1,
+						turnIndex: 1,
+						record: () => true,
+					}),
+				advanceMs,
+			);
+			return !settled.stoppedEarly;
+		}
+		case "sweep": {
+			const swept = await onFakeClock(
+				() =>
+					runObservedSettledSweep({
+						turnIndex: 1,
+						getTrackedPaths: () => files,
+						record: () => true,
+					}),
+				advanceMs,
+			);
+			return swept.reason === undefined && swept.scanned === files.length;
+		}
+		case "refresh": {
+			for (const file of files) noteMutationHandled(file);
+			const refreshed = await onFakeClock(
+				() => refreshObservedMutationLedger({ turnIndex: 1 }),
+				advanceMs,
+			);
+			return refreshed === files.length;
+		}
 	}
-	if (bound === "settle") return !(await settle(id, advanceMs)).stoppedEarly;
-	const files = NAMES.map((name) => path.join(dir, name));
-	const swept = await onFakeClock(
-		() =>
-			runObservedSettledSweep({
-				turnIndex: 1,
-				getTrackedPaths: () => files,
-				record: () => true,
-			}),
-		advanceMs,
-	);
-	// The post-drain refresh reads the same bound over the handled set.
-	for (const file of files) noteMutationHandled(file);
-	const refreshed = await onFakeClock(
-		() => refreshObservedMutationLedger({ turnIndex: 1 }),
-		advanceMs,
-	);
-	return (
-		swept.reason === undefined &&
-		swept.scanned === NAMES.length &&
-		refreshed === NAMES.length
-	);
 }
 
 describe("#3496 PI_LENS_TEST_TIME_BOUND_SCALE", () => {
 	it("leaves every bound at its production value when the scale is unset or not a positive number", async () => {
 		for (const value of [undefined, "", "0", "-1", "fast"]) {
 			vi.stubEnv("PI_LENS_TEST_TIME_BOUND_SCALE", value);
-			for (const bound of BOUNDS) {
-				// A fresh net per probe: repeated arms in one turn would otherwise
-				// spend the per-turn budget and read as the scale's doing.
-				resetObservedMutationNet();
-				resetMutationAttribution();
+			for (const probe of PROBE_NAMES)
 				expect(
-					await completes(bound, `call-${bound}-${value ?? "unset"}`),
-					`${bound} at scale=${value}`,
+					await completes(probe, `call-${probe}-${value ?? "unset"}`),
+					`${probe} at scale=${value}`,
 				).toBe(true);
-			}
 		}
 	});
 
@@ -186,17 +203,17 @@ describe("#3496 PI_LENS_TEST_TIME_BOUND_SCALE", () => {
 		"shrinks the %s bound when it or no bound is named, and only it",
 		async (bound) => {
 			vi.stubEnv("PI_LENS_TEST_TIME_BOUND_SCALE", SCALE);
-			expect(await completes(bound, `call-${bound}-all`), "all named").toBe(
-				false,
-			);
+			for (const probe of PROBE_NAMES.filter((name) => PROBES[name] === bound))
+				expect(
+					await completes(probe, `call-${bound}-all-${probe}`),
+					`${probe} with every bound scaled`,
+				).toBe(false);
 			vi.stubEnv("PI_LENS_TEST_TIME_BOUND", bound);
-			for (const probe of BOUNDS) {
-				resetObservedMutationNet();
-				resetMutationAttribution();
+			for (const probe of PROBE_NAMES) {
 				// The arm's timeout is min(turn budget left, capture budget), as in
 				// production, so a shrunk turn budget cuts the capture probe too.
 				const cut =
-					probe === bound || (bound === "turn" && probe === "capture");
+					PROBES[probe] === bound || (bound === "turn" && probe === "capture");
 				expect(
 					await completes(probe, `call-${bound}-${probe}`),
 					`${probe} with only ${bound} named`,
@@ -209,18 +226,16 @@ describe("#3496 PI_LENS_TEST_TIME_BOUND_SCALE", () => {
 		// The #3494 seam is how a test says "my verdict is about WHAT was seen,
 		// not how fast the host is"; the pass must not report such a test.
 		vi.stubEnv("PI_LENS_TEST_TIME_BOUND_SCALE", SCALE);
-		vi.stubEnv("PI_LENS_TEST_TIME_BOUND", undefined);
 		_setObservedTimeBoundsForTests({
 			captureMs: 200,
 			settleMs: 50,
 			sweepMs: 200,
 		});
-		for (const bound of ["capture", "settle", "sweep"] as const) {
-			resetObservedMutationNet();
-			resetMutationAttribution();
-			// The turn budget has no pin, so name the pinned bound alone.
-			vi.stubEnv("PI_LENS_TEST_TIME_BOUND", bound);
-			expect(await completes(bound, `call-pinned-${bound}`), bound).toBe(true);
+		for (const probe of PROBE_NAMES) {
+			// The turn budget has no pin, so name each pinned bound alone.
+			if (probe === "turn") continue;
+			vi.stubEnv("PI_LENS_TEST_TIME_BOUND", PROBES[probe]);
+			expect(await completes(probe, `call-pinned-${probe}`), probe).toBe(true);
 		}
 	});
 
@@ -231,17 +246,14 @@ describe("#3496 PI_LENS_TEST_TIME_BOUND_SCALE", () => {
 		// each bound; if it stays green the seam ignored the scale and the pass
 		// says so.
 		vi.unstubAllEnvs();
-		for (const bound of BOUNDS) {
-			resetObservedMutationNet();
-			resetMutationAttribution();
+		for (const probe of PROBE_NAMES)
 			expect(
 				await completes(
-					bound,
-					`call-canary-${bound}`,
-					CANARY_ADVANCE_MS[bound],
+					probe,
+					`call-canary-${probe}`,
+					CANARY_ADVANCE_MS[probe],
 				),
-				bound,
+				probe,
 			).toBe(true);
-		}
 	});
 });
