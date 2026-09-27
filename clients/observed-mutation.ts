@@ -103,6 +103,7 @@ import { createHash } from "node:crypto";
 
 import { BoundedFifoMap, BoundedSet } from "./bounded-cache.js";
 import { emitBounded } from "./bounded-telemetry.js";
+import { isTestMode } from "./env-utils.js";
 import { freshnessFromMtime } from "./freshness.js";
 import { logLatency } from "./latency-logger.js";
 import {
@@ -180,13 +181,19 @@ let sweepDeadlineOverrideMs: number | undefined;
  * production constant is returned unchanged. An override above wins where one
  * exists: a test that pinned its bounds is exactly the test the scale must not
  * move.
+ *
+ * Gated to test mode like the other `PI_LENS_TEST_*` readers, and the scale
+ * only ever shrinks: a value outside (0, 1) is ignored, because `Infinity` or
+ * `1e8` inverted into an immediate timeout (review F4: `bounded()` maps a
+ * non-finite budget to 0 and Node clamps an overflowing delay to 1 ms).
  */
 function scaledBoundMs(
 	bound: "capture" | "settle" | "sweep" | "turn",
 	ms: number,
 ): number {
+	if (!isTestMode()) return ms;
 	const scale = Number(process.env.PI_LENS_TEST_TIME_BOUND_SCALE);
-	if (!(scale > 0)) return ms;
+	if (!(Number.isFinite(scale) && scale > 0 && scale < 1)) return ms;
 	const only = process.env.PI_LENS_TEST_TIME_BOUND;
 	if (only && only !== bound) return ms;
 	return ms * scale;

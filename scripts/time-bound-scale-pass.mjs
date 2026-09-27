@@ -42,6 +42,9 @@ export const TIME_BOUNDS = Object.freeze([
 
 export const DEFAULT_SCALE = 0.2;
 
+/** Reruns of a candidate flip, alone, before it counts (review F3). */
+export const CONFIRM_RUNS = 3;
+
 /** Expected to flip under every bound; see the module doc. */
 export const CANARY =
 	"tests/clients/observed-mutation-time-bound-scale.test.ts > #3496 PI_LENS_TEST_TIME_BOUND_SCALE > canary: an unpinned observation completes under the ambient bounds";
@@ -134,15 +137,18 @@ export function verdicts(report, repoRoot) {
 
 /**
  * Judge one unscaled run against one scaled run per bound.
- * `scaled` maps a bound name to its verdicts.
+ * `scaled` maps a bound name to its verdicts. `confirm(flip)` re-runs a
+ * candidate flip on its own; one that does not reproduce is load noise from
+ * the population run (review F3), reported as `unconfirmed`, never a finding.
  */
 export function comparePassRuns({
 	baseline,
 	scaled,
 	admitted = ADMITTED,
 	canary = CANARY,
+	confirm = () => true,
 }) {
-	const flips = [];
+	const candidates = [];
 	const unjudgeable = [];
 	for (const [key, status] of baseline)
 		if (status !== "passed")
@@ -153,9 +159,13 @@ export function comparePassRuns({
 			const after = run.get(key);
 			if (after === undefined)
 				unjudgeable.push(`${key}: missing from the ${bound}-scaled run`);
-			else if (after === "failed") flips.push({ key, bound });
+			else if (after === "failed") candidates.push({ key, bound });
 		}
 	}
+	const flips = [];
+	const unconfirmed = [];
+	for (const candidate of candidates)
+		(confirm(candidate) ? flips : unconfirmed).push(candidate);
 	const findings = [];
 	for (const bound of scaled.keys())
 		if (!flips.some((flip) => flip.key === canary && flip.bound === bound))
@@ -164,8 +174,13 @@ export function comparePassRuns({
 			);
 	for (const flip of flips) {
 		if (flip.key === canary || flip.key in admitted) continue;
+		// The turn budget has no `_setObservedTimeBoundsForTests` pin.
+		const remedy =
+			flip.bound === "turn"
+				? "The turn budget has no pin, so admit it in scripts/time-bound-scale-pass.mjs with a reason naming an issue"
+				: "Pin its bounds with _setObservedTimeBoundsForTests, or admit it in scripts/time-bound-scale-pass.mjs with a reason naming an issue";
 		findings.push(
-			`${flip.key}: flips when the ${flip.bound} bound is scaled. Pin its bounds with _setObservedTimeBoundsForTests, or admit it in scripts/time-bound-scale-pass.mjs with a reason naming an issue`,
+			`${flip.key}: flips when the ${flip.bound} bound is scaled. ${remedy}`,
 		);
 	}
 	for (const key of Object.keys(admitted))
@@ -173,7 +188,7 @@ export function comparePassRuns({
 			findings.push(
 				`${key}: admitted but no longer flips; delete the dead admission`,
 			);
-	return { flips, findings, unjudgeable };
+	return { flips, unconfirmed, findings, unjudgeable };
 }
 
 /** 2 when the pass could not judge, 1 on findings, 0 clean. */
@@ -183,16 +198,23 @@ export function passExitCode({ findings, unjudgeable }) {
 }
 
 /** The summary lines: one per flip, with the bound that flipped it. */
-export function summaryLines({ flips, findings, unjudgeable }, scale) {
+export function summaryLines(
+	{ flips, unconfirmed = [], findings, unjudgeable },
+	scale,
+) {
 	return [
 		`time-bound scale pass (scale ${scale})`,
 		...flips.map((flip) => `FLIPPED ${flip.key} [bound: ${flip.bound}]`),
+		...unconfirmed.map(
+			(flip) =>
+				`UNCONFIRMED ${flip.key} [bound: ${flip.bound}] (did not reproduce alone; load noise)`,
+		),
 		...findings.map((finding) => `FINDING ${finding}`),
 		...unjudgeable.map((line) => `UNJUDGEABLE ${line}`),
 	];
 }
 
-function runVitest(repoRoot, files, extraEnv, outFile) {
+function runVitest(repoRoot, files, extraEnv, outFile, extraArgs = []) {
 	// The unscaled run must not inherit a scale from the caller's shell.
 	const env = { ...process.env };
 	delete env.PI_LENS_TEST_TIME_BOUND_SCALE;
@@ -204,8 +226,12 @@ function runVitest(repoRoot, files, extraEnv, outFile) {
 			path.join(repoRoot, "node_modules/vitest/vitest.mjs"),
 			"run",
 			...files,
+			// Serial files (review F3): at 0.2x the bounds are tens of ms, and
+			// parallel forks turned their contention into flips.
+			"--no-file-parallelism",
 			"--reporter=json",
 			`--outputFile=${outFile}`,
+			...extraArgs,
 		],
 		{ cwd: repoRoot, env, stdio: ["ignore", "ignore", "inherit"] },
 	);
@@ -253,7 +279,30 @@ function main() {
 					path.join(work, `${bound}.json`),
 				),
 			);
-		const result = comparePassRuns({ baseline, scaled });
+		// A candidate counts only if the case alone fails scaled and passes
+		// unscaled on every one of CONFIRM_RUNS runs.
+		let runIndex = 0;
+		const caseVerdict = (key, extraEnv) => {
+			const [file, ...titles] = key.split(" > ");
+			const title = titles.at(-1) ?? "";
+			const out = path.join(work, `confirm-${runIndex++}.json`);
+			return runVitest(repoRoot, [file], extraEnv, out, [
+				"-t",
+				title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+			]).get(key);
+		};
+		const confirm = ({ key, bound }) => {
+			for (let i = 0; i < CONFIRM_RUNS; i += 1) {
+				const env = {
+					PI_LENS_TEST_TIME_BOUND_SCALE: String(scale),
+					PI_LENS_TEST_TIME_BOUND: bound,
+				};
+				if (caseVerdict(key, env) !== "failed") return false;
+				if (caseVerdict(key, {}) !== "passed") return false;
+			}
+			return true;
+		};
+		const result = comparePassRuns({ baseline, scaled, confirm });
 		const lines = summaryLines(result, scale);
 		console.log(`population: ${files.length} file(s)\n${files.join("\n")}`);
 		console.log(lines.join("\n"));

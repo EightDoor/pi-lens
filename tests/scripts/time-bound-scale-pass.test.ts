@@ -116,6 +116,41 @@ describe("#3496 time-bound scale pass", () => {
 		]);
 	});
 
+	it("reports only a flip that reproduces alone, and names the turn remedy", () => {
+		// Review F3: at 0.2x the bounds are tens of ms, so a population run
+		// flipped unrelated cases at random. Only a confirmed flip is a finding.
+		const noisy = comparePassRuns({
+			baseline,
+			scaled: scaledRuns({ settle: { [SENSITIVE]: "failed" } }),
+			admitted: {},
+			confirm: (flip) => flip.key === CANARY,
+		});
+		expect(noisy.findings).toEqual([]);
+		expect(noisy.unconfirmed).toEqual([{ key: SENSITIVE, bound: "settle" }]);
+		expect(passExitCode(noisy)).toBe(0);
+		expect(summaryLines(noisy, 0.2)).toContain(
+			`UNCONFIRMED ${SENSITIVE} [bound: settle] (did not reproduce alone; load noise)`,
+		);
+
+		const turn = comparePassRuns({
+			baseline,
+			scaled: new Map([
+				[
+					"turn",
+					run({
+						[STEADY]: "passed",
+						[SENSITIVE]: "failed",
+						[CANARY]: "failed",
+					}),
+				],
+			]),
+			admitted: {},
+		});
+		expect(turn.findings).toEqual([
+			`${SENSITIVE}: flips when the turn bound is scaled. The turn budget has no pin, so admit it in scripts/time-bound-scale-pass.mjs with a reason naming an issue`,
+		]);
+	});
+
 	it("reds when the canary stays green under a bound: the seam ignored the scale", () => {
 		const result = comparePassRuns({
 			baseline,

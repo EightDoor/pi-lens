@@ -13,8 +13,8 @@
  *
  * Fake timers, not a loaded host: `bounded()` arms its timer synchronously
  * inside the call, so advancing the fake clock by 20 ms before any I/O callback
- * can run decides the race deterministically. Every unscaled timer bound
- * (200 ms capture, 200 ms settle race, 400 ms sweep race) sits above 20 ms; at
+ * can run decides the race deterministically. Every unscaled bound (200 ms
+ * capture, 50 ms settle deadline, 200 ms sweep window) sits above 20 ms; at
  * the 0.01 scale below every one sits under it. The turn budget needs no clock
  * at all: the probe spends all but 3 ms of it, so any scale under 0.995 leaves
  * nothing and the arm reports `budget-exhausted`.
@@ -65,16 +65,16 @@ const PROBE_NAMES = Object.keys(PROBES) as Probe[];
 const ADVANCE_MS = 20;
 const SCALE = "0.01";
 /**
- * The canary's advance per probe: 1 ms under that site's unscaled race (the
- * 200 ms capture budget, the 4 x 50 ms settle race, the 2 x 200 ms sweep
- * race), so it passes unscaled and flips under ANY scale the pass can use
+ * The canary's advance per probe: 1 ms under that site's unscaled bound (the
+ * 200 ms capture budget, the 50 ms settle per-entry deadline, the 200 ms sweep
+ * window), so it passes unscaled and flips under ANY scale the pass can use
  * (below 0.995), not only under 0.01. The turn probe needs no clock.
  */
 const CANARY_ADVANCE_MS: Record<Probe, number> = {
 	capture: 199,
-	settle: 199,
-	sweep: 399,
-	refresh: 399,
+	settle: 49,
+	sweep: 199,
+	refresh: 199,
 	turn: 0,
 };
 
@@ -102,13 +102,17 @@ afterEach(() => {
 	env.cleanup();
 });
 
-/** Start `work` on the fake clock, advance it, and hand back the real one. */
+/**
+ * Start `work` on the fake clock, advance it, and keep the clock (timers AND
+ * `Date`) fake until `work` settles. The settle and sweep deadlines are
+ * `Date.now()` comparisons, so restoring the real clock mid-flight made every
+ * "completes" expectation race host speed (review F2: 0/6 at 32 hogs).
+ */
 function onFakeClock<T>(work: () => Promise<T>, advanceMs: number): Promise<T> {
-	vi.useFakeTimers();
+	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
 	const running = work();
 	vi.advanceTimersByTime(advanceMs);
-	vi.useRealTimers();
-	return running;
+	return running.finally(() => vi.useRealTimers());
 }
 
 function arm(toolCallId: string, advanceMs: number) {
@@ -188,16 +192,20 @@ async function completes(
 }
 
 describe("#3496 PI_LENS_TEST_TIME_BOUND_SCALE", () => {
-	it("leaves every bound at its production value when the scale is unset or not a positive number", async () => {
-		for (const value of [undefined, "", "0", "-1", "fast"]) {
+	// Review F4: `Infinity` and `1e8` used to invert into an immediate timeout,
+	// and `1` or more can only widen a bound. One case per value keeps each
+	// case's work to five probes.
+	it.each([undefined, "", "0", "-1", "fast", "1", "10", "1e8", "Infinity"])(
+		"leaves every bound at its production value when the scale is %s (unset or outside (0, 1))",
+		async (value) => {
 			vi.stubEnv("PI_LENS_TEST_TIME_BOUND_SCALE", value);
 			for (const probe of PROBE_NAMES)
 				expect(
 					await completes(probe, `call-${probe}-${value ?? "unset"}`),
 					`${probe} at scale=${value}`,
 				).toBe(true);
-		}
-	});
+		},
+	);
 
 	it.each(BOUNDS)(
 		"shrinks the %s bound when it or no bound is named, and only it",
@@ -221,6 +229,15 @@ describe("#3496 PI_LENS_TEST_TIME_BOUND_SCALE", () => {
 			}
 		},
 	);
+
+	it("is inert outside test mode", async () => {
+		// Review F4: the seam reads a PI_LENS_TEST_* variable, so like its
+		// siblings it answers only under isTestMode().
+		vi.stubEnv("PI_LENS_TEST_MODE", "0");
+		vi.stubEnv("PI_LENS_TEST_TIME_BOUND_SCALE", SCALE);
+		for (const probe of PROBE_NAMES)
+			expect(await completes(probe, `call-prod-${probe}`), probe).toBe(true);
+	});
 
 	it("loses to a bound the test pinned through _setObservedTimeBoundsForTests", async () => {
 		// The #3494 seam is how a test says "my verdict is about WHAT was seen,

@@ -1,5 +1,6 @@
 export declare const TIME_BOUNDS: readonly string[];
 export declare const DEFAULT_SCALE: number;
+export declare const CONFIRM_RUNS: number;
 export declare const CANARY: string;
 export declare const ADMITTED: Readonly<Record<string, string>>;
 export declare const ADMISSION_HEADER: RegExp;
@@ -14,6 +15,7 @@ export interface PassFlip {
 }
 export interface PassResult {
 	flips: PassFlip[];
+	unconfirmed: PassFlip[];
 	findings: string[];
 	unjudgeable: string[];
 }
@@ -27,9 +29,10 @@ export declare function comparePassRuns(input: {
 	scaled: Map<string, Map<string, Verdict>>;
 	admitted?: Readonly<Record<string, string>>;
 	canary?: string;
+	confirm?: (flip: PassFlip) => boolean;
 }): PassResult;
 export declare function passExitCode(result: PassResult): 0 | 1 | 2;
 export declare function summaryLines(
-	result: PassResult,
+	result: Omit<PassResult, "unconfirmed"> & { unconfirmed?: PassFlip[] },
 	scale: number,
 ): string[];
