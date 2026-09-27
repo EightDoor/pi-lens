@@ -331,7 +331,6 @@ describe("index.ts extension wiring", () => {
 	it("re-wires a recovered bus on a #473-guarded subagent session_start (#1383)", async () => {
 		_resetSessionLifecycleForTests();
 		resetBusPublishForTests();
-		resetDegradationLedger();
 		try {
 			const parent = createPiMock();
 			const parentApi = parent.asExtensionAPI();
@@ -346,6 +345,15 @@ describe("index.ts extension wiring", () => {
 				{ reason: "startup" },
 				makeCtx({ cwd: process.cwd(), sessionId: "parent" }),
 			);
+			// The parent's session_start registers the instance in the shared
+			// `.probe-home` registry. When an earlier fork exited holding that
+			// registry's lock, the registration takes the lock over and records
+			// `instance-registry-lock-stale-takeover` (red 4 of 6 whole-file runs
+			// on one host). The exact-list assertion below is about the stale
+			// publish only, so reset the ledger after session_start, not before
+			// it. Everything from here to that assertion is synchronous, so a
+			// registration still in flight cannot record in between.
+			resetDegradationLedger();
 
 			const dbg = vi.fn();
 			wireBusEmitter(() => {
