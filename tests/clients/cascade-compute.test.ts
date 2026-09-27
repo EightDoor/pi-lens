@@ -9,6 +9,7 @@ import type {
 import { setupTestEnvironment } from "./test-utils.js";
 import { makeLspServiceDouble } from "../support/lsp-service-double.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import { writeOrderToken } from "../../clients/write-ordering-guard.js";
 
 type ImpactHitMock = {
 	symbol: string;
@@ -2400,7 +2401,11 @@ describe("computeCascadeForFile", () => {
 				const { recordDiagnostics, getFileDiagnostics } =
 					await import("../../clients/widget-state.js");
 
-				// A NEWER per-edit LSP-error record for the neighbor (writeIndex 10).
+				// A NEWER per-edit LSP-error record for the neighbor (order turn 7,
+				// writeIndex 10), in the pipeline's turn-first widget order (#3540).
+				// #3540 r2: the order turn is not the session's turn (`turnSeq`,
+				// which restarts at a session reset); the cascade orders by the one
+				// its primary edit carried.
 				recordDiagnostics(
 					neighbor,
 					[
@@ -2411,13 +2416,14 @@ describe("computeCascadeForFile", () => {
 							message: "newer per-edit result",
 						},
 					],
-					10,
+					writeOrderToken(7, 10),
 				);
 
 				// Cascade launched from an OLDER primary edit (writeSeq 3) lands late —
 				// its reconcile must be dropped by the WriteOrderingGuard.
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
+					orderTurn: 7,
 					writeSeq: 3,
 				});
 				expect(getFileDiagnostics(neighbor)?.[0]?.message).toBe(
@@ -2430,6 +2436,7 @@ describe("computeCascadeForFile", () => {
 				resetDispatchBaselines();
 				await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
+					orderTurn: 7,
 					writeSeq: 20,
 				});
 				expect(getFileDiagnostics(neighbor)?.[0]?.message).toBe(

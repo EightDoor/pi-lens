@@ -27,8 +27,10 @@ import {
 	getGlobalActionableWarningMaxFixes,
 	type PiLensFlagSource,
 } from "./lens-config.js";
+import { captureLspServiceGeneration } from "./lsp/server.js";
 import {
 	type LspResyncOutcome,
+	resyncHeldLspDocument,
 	resyncLspFile,
 	runAutofix,
 	runFormatPhase,
@@ -36,7 +38,7 @@ import {
 import { holdFileMutationQueue } from "./file-mutation-queue.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import { type ProjectChangeSource } from "./project-changes.js";
-import type { RuntimeCoordinator } from "./runtime-coordinator.js";
+import type { PathSetLike, RuntimeCoordinator } from "./runtime-coordinator.js";
 import {
 	getAutofixPolicyForFile,
 	hasBiomeConfig,
@@ -160,6 +162,39 @@ export async function handleAgentEnd({
 	const session = runtime.captureSessionGeneration();
 	const branchEpoch =
 		readGuardBranchEpoch ?? runtime.readGuard.currentBranchEpoch;
+	// #3576: the LSP service the drain started against. session_shutdown and
+	// the idle reset retire it without bumping the session above.
+	const lspService = captureLspServiceGeneration();
+	/**
+	 * #3576: the drain's resync of a file it wrote. While its session and its
+	 * LSP service are current, a stamped `resyncLspFile` of `read()`. Once
+	 * either was replaced, `getLSPService()` would build a fresh service and a
+	 * touch would spawn its server, so (R1) the resync goes only to a live
+	 * client that already holds the file; undefined then.
+	 */
+	const syncDrainWrite = async (
+		filePath: string,
+		read: () => { content: string; readStamp: number },
+	): Promise<LspResyncOutcome | undefined> => {
+		if (
+			session.guardedWrite(filePath, () =>
+				lspService.guardedWrite(filePath, () => true),
+			)
+		) {
+			const { content, readStamp } = read();
+			return resyncLspFile(
+				filePath,
+				content,
+				true,
+				false,
+				getFlag,
+				dbg,
+				readStamp,
+			);
+		}
+		await resyncHeldLspDocument(filePath);
+		return undefined;
+	};
 	const { claimed, staleClaimed, deferredToOwner, droppedOrphans } =
 		runtime.claimDeferredMutations(
 			currentSessionId,
@@ -368,6 +403,18 @@ export async function handleAgentEnd({
 		kind: "autofix";
 	}> = [];
 	const deferredAutofixChanged = new Set<string>();
+	// #3576: runAutofix marks a file fixed after its fixer awaits; a replaced
+	// session's mark would skip the next session's own autofix of that file.
+	const sessionFixedThisTurn = runtime.fixedThisTurn;
+	const fixedThisTurn: PathSetLike = {
+		...sessionFixedThisTurn,
+		add: (fixedPath) => {
+			session.guardedWrite(fixedPath, () =>
+				sessionFixedThisTurn.add(fixedPath),
+			);
+			return fixedThisTurn;
+		},
+	};
 	// #3528 r2: every claimed file a replaced session's drain does not start is
 	// named once, not only the first one each loop meets.
 	const skipReplaced = (filePath: string): void => {
@@ -464,7 +511,7 @@ export async function handleAgentEnd({
 				record.cwd,
 				getFlag,
 				dbg,
-				{ biomeClient, ruffClient, fixedThisTurn: runtime.fixedThisTurn },
+				{ biomeClient, ruffClient, fixedThisTurn },
 				getFlagSource,
 				fixHold,
 			);
@@ -657,21 +704,16 @@ export async function handleAgentEnd({
 								await (
 									await phase
 								).abandoned;
-								// #3528 r1 F1: a replaced session retired the LSP service,
-								// so a touch now would spawn a server for the next session.
-								if (session.guardedWrite(filePath, () => true)) {
-									const readStamp = performance.now();
-									const content = nodeFs.readFileSync(filePath, "utf-8");
-									outcome = await resyncLspFile(
-										filePath,
-										content,
-										true,
-										false,
-										getFlag,
-										dbg,
-										readStamp,
-									);
-								}
+								// #3528 r1 F1, #3576: a replaced session or a retired LSP
+								// service gets no touch that would spawn a server.
+								outcome =
+									(await syncDrainWrite(filePath, () => {
+										const readStamp = performance.now();
+										return {
+											readStamp,
+											content: nodeFs.readFileSync(filePath, "utf-8"),
+										};
+									})) ?? "stale-session";
 							} catch (err) {
 								outcome = "read-failed";
 								dbg(
@@ -851,20 +893,14 @@ export async function handleAgentEnd({
 
 			if (result.fileContent) {
 				const fileContent = result.fileContent;
-				// #3528 r1 F1: not into a replaced session's retired LSP service.
-				await session.guardedWrite(filePath, () =>
-					resyncLspFile(
-						filePath,
-						fileContent,
-						true,
-						false,
-						getFlag,
-						dbg,
-						// #3529: the next run's edit can land once the hold is released,
-						// and its own stamped sync must not be replaced by this older read.
-						result.fileReadStamp,
-					),
-				);
+				// #3528 r1 F1, #3576: not into a replaced session's or a retired
+				// LSP service.
+				await syncDrainWrite(filePath, () => ({
+					content: fileContent,
+					// #3529: the next run's edit can land once the hold is released,
+					// and its own stamped sync must not be replaced by this older read.
+					readStamp: result.fileReadStamp,
+				}));
 			}
 
 			dbg(
@@ -900,25 +936,28 @@ export async function handleAgentEnd({
 	// particular, never publish the autofix intermediate state before format.
 	for (const changedPath of deferredAutofixChanged) {
 		if (!nodeFs.existsSync(changedPath)) continue;
-		// #3528 r1 F1: not into a replaced session's retired LSP service.
-		await session.guardedWrite(changedPath, () => {
+		// #3528 r1 F1, #3576: not into a replaced session's or a retired LSP
+		// service.
+		await syncDrainWrite(changedPath, () => {
 			// #3529: stamped, like the format resync above.
 			const readStamp = performance.now();
-			const content = nodeFs.readFileSync(changedPath, "utf-8");
-			return resyncLspFile(
-				changedPath,
-				content,
-				true,
-				false,
-				getFlag,
-				dbg,
+			return {
 				readStamp,
-			);
+				content: nodeFs.readFileSync(changedPath, "utf-8"),
+			};
 		});
 	}
 
-	if (inspectActionableReport) {
-		const actionCwd = ctxCwd ?? runtime.projectRoot;
+	// #3576: a replaced session's drain applies no quickfix. Its edits and
+	// their bookkeeping would land in the next session, and the pass's
+	// getLSPService() would build a fresh service after resetLSPService.
+	const actionCwd = ctxCwd ?? runtime.projectRoot;
+	if (
+		inspectActionableReport &&
+		session.guardedWrite(`actionable-warnings:${actionCwd}`, () =>
+			lspService.guardedWrite(`actionable-warnings:${actionCwd}`, () => true),
+		)
+	) {
 		const actionableWarningsMaxAgeMs = 10 * 60_000;
 		const actionReport = cacheManager.readCache<ActionableWarningsReport>(
 			"actionable-warnings",
@@ -1046,6 +1085,8 @@ export async function handleAgentEnd({
 								recordWritten: (filePath: string) =>
 									runtime.readGuard.recordWritten(filePath, { branchEpoch }),
 							},
+					// #3576: a /new during the pass stops it and its bookkeeping.
+					session,
 					recordAutofix: getFlag("lens-turn-summary")
 						? (filePath) =>
 								runtime.turnSummary.recordAutofix(filePath, {

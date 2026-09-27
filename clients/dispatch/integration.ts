@@ -119,6 +119,7 @@ import {
 	type WordIndex,
 } from "../word-index.js";
 import { reconcileCascadeNeighborLspErrors } from "../widget-state.js";
+import { writeOrderToken } from "../write-ordering-guard.js";
 import { findAuxiliaryProfileForSource } from "./auxiliary-lsp.js";
 // Register fact providers. All register eagerly here (the dispatch entry) — the
 // tree-sitter-backed providers included, since the parsing stack loads
@@ -997,6 +998,8 @@ export async function computeCascadeForFile(
 		dbg?: (msg: string) => void;
 		/** Turn/write sequence from RuntimeCoordinator — scopes cascade caches (A5/B10) */
 		turnSeq?: number;
+		/** #3540 r2: the primary edit's order turn, for its widget writes. */
+		orderTurn?: number;
 		writeSeq?: number;
 		/**
 		 * Authoritative workspace root (`PipelineContext.projectRoot`). `cwd` above
@@ -1063,6 +1066,7 @@ export async function computeCascadeForFile(
 			hasBlockers = false,
 			dbg,
 			turnSeq = 0,
+			orderTurn,
 			writeSeq,
 			projectRoot,
 			seqState,
@@ -1072,6 +1076,8 @@ export async function computeCascadeForFile(
 			onWordIndexUpdated,
 			sessionGeneration,
 		} = options;
+		// #3540: the primary edit's widget order, turn first.
+		const widgetOrder = writeOrderToken(orderTurn, writeSeq);
 
 		ensureCascadeTurnScope(turnSeq);
 
@@ -1899,7 +1905,7 @@ export async function computeCascadeForFile(
 				reconcileCascadeNeighborLspErrors(
 					neighborPath,
 					cascadeReconcilableLspErrors(entry.diags, neighborPath),
-					writeSeq,
+					widgetOrder,
 					entry.ts,
 				);
 
@@ -2253,7 +2259,7 @@ export async function computeCascadeForFile(
 						reconcileCascadeNeighborLspErrors(
 							neighborPath,
 							cascadeReconcilableLspErrors(rawDiags.diags, neighborPath),
-							writeSeq,
+							widgetOrder,
 							readAtMs,
 						);
 					}
@@ -2849,6 +2855,8 @@ export async function dispatchLintWithResult(
 		projectRoot?: string;
 		/** Ordered per-file pipeline token, when called from tool_result. */
 		writeIndex?: number;
+		/** #3568: the tool_result handler's session. */
+		sessionGeneration?: GenerationHandle;
 		/** Runtime telemetry identity, when known (#1448) — see
 		 * DispatchContext.telemetryModel's doc. */
 		telemetryModel?: string;
@@ -2869,6 +2877,7 @@ export async function dispatchLintWithResult(
 		options?.writeIndex,
 		options?.telemetryModel,
 		options?.telemetryProvider,
+		options?.sessionGeneration,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 	// #2243 item 2: release the pin when the dispatch settles.
