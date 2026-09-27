@@ -37,6 +37,7 @@ import {
 	RULE_MESSAGES,
 	scannableRegions,
 	splitSegments,
+	splitSegmentsWithSeparators,
 	splitWords,
 	stripEnvAssignments,
 } from "../../scripts/hooks/guard-bash.mjs";
@@ -178,6 +179,35 @@ const DENY_CASES: Array<[command: string, ruleNeedle: string]> = [
 	["TMPDIR=$PI_LENS_HOME npx vitest run tests/config", "tmpdir"],
 	["TMPDIR=${PI_LENS_HOME}/x npx vitest run tests/config", "tmpdir"],
 	["TMPDIR=$PI_LENS_HOME/sub npx vitest run tests/config", "tmpdir"],
+	// #3556: pkill/killall with a bare, unscoped pattern -- the acceptance
+	// criterion's own reproduction ("The hook refuses `pkill -f tlc2.TLC`").
+	["pkill -f tlc2.TLC", "pkill"],
+	["pkill tlc2", "pkill"],
+	["killall tlc2.TLC", "pkill"],
+	["killall -9 vitest", "pkill"],
+	// #3526: an absolute /tmp destination for a scratch checkout -- the
+	// incident this rule fixes, verbatim.
+	["git worktree add /tmp/pi-lens-review-1234", "/tmp"],
+	[
+		"git clone https://github.com/apmantza/pi-lens /tmp/pi-lens-scratch",
+		"/tmp",
+	],
+	// An absolute mktemp template, or an explicit -p/--tmpdir=, under /tmp --
+	// self-contained (unlike the bare "mktemp -d" default, this does not
+	// depend on this test runner's own ambient TMPDIR).
+	["mktemp -d /tmp/pi-lens-review-XXXXXX", "/tmp"],
+	["mktemp -d -p /tmp/scratch foo.XXXXXX", "/tmp"],
+	["mktemp --directory --tmpdir=/tmp/scratch foo.XXXXXX", "/tmp"],
+	// #3471: a check's exit code lost to `;`/`|` before an unconditional
+	// git commit/push -- the issue's own case 1 and case 2, verbatim.
+	[
+		'npm run lint >/dev/null 2>&1; echo "lint=$?"; git add -A && git commit -m "x"',
+		"chained",
+	],
+	[
+		"npx vitest run tests/foo.test.ts 2>&1 | grep -iE 'error|fail'; git add -A && git commit -m x && git push origin y",
+		"chained",
+	],
 ];
 
 // Every allow string the issue lists, which must stay green.
@@ -209,7 +239,9 @@ const ALLOW_CASES: string[] = [
 	"git worktree list",
 	// double-force on a non-"remove" worktree subcommand -- the rule is
 	// "remove with two forces", not "worktree with two forces anywhere".
-	"git worktree add /tmp/new-tree -f -f",
+	// (#3526: the path is off /tmp on purpose -- a /tmp destination is its
+	// own, unrelated deny, tmpCheckout, pinned separately below.)
+	"git worktree add .claude/worktrees/new-tree -f -f",
 	// $(...) fully inside single quotes is literal text to bash (no
 	// expansion), so the tokenizer must not extract it as a subshell.
 	"echo '$(git stash)'",
@@ -275,6 +307,53 @@ const ALLOW_CASES: string[] = [
 	// static scan, so this ALLOWS. The row exists so the limit is a pinned,
 	// visible behaviour rather than an untested claim in a docblock.
 	"export PROBE_HOME=$PWD/.probe-home; export TMPDIR=$PROBE_HOME; npm test",
+	// #3556: `kill <pid>` is a different command from pkill/killall entirely
+	// -- the acceptance criterion's own "It allows `kill <pid>`".
+	"kill 12345",
+	"kill -9 12345",
+	// #3526: the acceptance list's own named exemptions. `.claude/worktrees/`
+	// is relative, resolved against repoRoot (this suite's own cwd), which is
+	// never under /tmp.
+	"git worktree add .claude/worktrees/agent-3526-deadbeef",
+	"git worktree add ~/.cache/pi-lens-orchestrator/worktrees/agent-x",
+	"git worktree add ~/.local/share/pi-lens-orchestrator/tmp/lane-1",
+	"git worktree add ~/.plegma/work/sub-1",
+	// git clone with no explicit destination -- name-derived, out of scope
+	// (documented blind spot: this static scan cannot resolve it).
+	"git clone https://github.com/apmantza/pi-lens",
+	// git clone WITH an explicit destination, off /tmp.
+	"git clone https://github.com/apmantza/pi-lens /home/dev/scratch/pi-lens",
+	// mktemp for a FILE (no -d/--directory) is always allowed regardless of
+	// where it lands -- even a FILE path that is itself under /tmp.
+	"mktemp foo.XXXXXX",
+	"mktemp /tmp/pi-lens-review-file.XXXXXX",
+	"mktemp",
+	// An explicit -p/--tmpdir= OUTSIDE /tmp allows even though the template
+	// itself is bare.
+	"mktemp -d -p /home/dev/scratch foo.XXXXXX",
+	"mktemp -d --tmpdir=/home/dev/scratch foo.XXXXXX",
+	// rm/ls/du/find on /tmp are untouched -- this file never classifies them.
+	"rm -rf /tmp/pi-lens-review-1234",
+	"ls /tmp",
+	// #3471: fully `&&`-gated -- the issue's own case 1 and case 2, rewritten.
+	'npm run lint >/dev/null 2>&1 && git add -A && git commit -m "x"',
+	"npx vitest run tests/foo.test.ts && git add -A && git commit -m x && git push origin y",
+	// The repo's own sanctioned pattern (this file's fixer-playbook sibling:
+	// "Run git status after the commit completes to verify success") -- no
+	// check precedes the commit at all, so nothing is judged.
+	'git commit -m "x" ; git status',
+	// A write gated by an EARLIER write via && -- the boundary-stop search
+	// for the nearest check must not reach back past it.
+	"npm run lint && git push origin y ; git commit -m x",
+	// Gated through shell control flow (`if [ $vexit -eq 0 ]`, this repo's
+	// own convention for deciding after saving a check's exit code) rather
+	// than `&&` -- unmodeled, so left alone rather than guessed at.
+	"npm run build; vexit=$?; if [ $vexit -eq 0 ]; then git commit -m x; fi",
+	// A node script that is NOT scripts/check-*.mjs is not a "check".
+	"node scripts/build.mjs ; git commit -m x",
+	// Two checks, `;`-separated, with NO git commit/push anywhere -- nothing
+	// for this rule to judge at all.
+	"npm run lint ; npm run build",
 ];
 
 // Round-2 survey harness retained as a regression fixture for #2705. The
@@ -308,9 +387,44 @@ function commandHash(command: string): string {
 // These are the only two commands in the 2026-09-07..08 transcript corpus
 // that exercise a guard rule. Keep this allowlist independent of findDeny so
 // a rule widening cannot silently turn a false positive into an expectation.
+//
+// #3471's `checkUngated` rule audited the same corpus (verbatim commands,
+// re-derived hashes in the PR body) and found 20 REAL historical instances
+// of the exact shape the issue describes: a check (`npm run
+// lint`/`build`/`test`, `npx vitest`, `node scripts/check-*.mjs`) piped to
+// `grep`/`tail`/`head` -- which replaces its exit status with the filter's,
+// almost always 0 -- and/or separated by `;`, with a `git commit`/`git push`
+// then running unconditionally (or gated on the WRONG, filter's, exit
+// status) rather than on the check's own result. Each one was read in full
+// before pinning; none is gated through shell control flow (that shape --
+// `vexit=$?; …; if [ $vexit -eq 0 ]; then git commit …; fi`, also present
+// in this corpus -- is excluded from the rule entirely, see
+// CONTROL_FLOW_WORDS in guard-bash.mjs, and contributes ZERO of these 20).
 const EXPECTED_TRANSCRIPT_DENIES = new Set([
 	"21def4efd19e12fd4fcb3f0cfcbc7f000814ed54d6ecdb39701e74b08288811f",
 	"30b1b57e56ca162793f411ef91bc8e47607a91f420039b3e00451ecd5278ea02",
+	// #3471 checkUngated -- audited true positives (PR body has the full
+	// verbatim commands and the per-hash reasoning):
+	"ff582cb347e379fcf2dd2e965ea22a0313e76f18edad51ef7efc0cd01ad7b0ae",
+	"ada188d5f502c2c534e449a06b19aeef59e5d3f48e47f7061a1b8e65d1c55bce",
+	"a4f133cc3630108fcac7048f875b54e8920a2e01ba1f05426fbea6d4155d5582",
+	"361b6ddfa5b81d111cd47883870ab7fcbd46a338ebe34e0f195dad22fdacd1cd",
+	"b7e841213ab73312e829093f80495d3e5137b12f9119527b7a72828756a3953c",
+	"07db63515b544bb9590a9cc2b2635ab663bbebd9dbc3e678e8a045027108a86d",
+	"753dcb972e90d8bf7eea472aaef27385c204a8207161c1ca4108fd1d6a2ceb86",
+	"6cfb7e92ef0c2eca551db9a684e8f172cc518b918a9905893e708fe147d1b160",
+	"be38e0c9692695e1a954326eec1d4b58ab1f16f109541388a8ff2b021a1d899c",
+	"1fe3f8f5d4256ba9cf4533648d9042f8b3241a32e7d9cb4e68a418b1f772c7c3",
+	"9149ffc1d0e49e2f5f95034626f1af7d29cc392acd80c0a3d9a9a8444186c296",
+	"51da626c87c6754f450617d738c4bdc7367a700a4fcaa9cc7833ff4ce8bd2aa5",
+	"a7e72ce55e6a139fbfb8cf1ccef5c44195354c4b6f7148c0c2da23c94722ece6",
+	"a2643e0ca815efd1cc39f61df81a82b09369581c96fef17f50ef2c8368daa6a6",
+	"6df74407743e7df399c37e01281948bb3a10120a3ecf3d705d1208853a35bd61",
+	"058bbb4cf2d5477a7451cf3b0e81452096e6935e66696fe67f3ce68ee2c46904",
+	"a50b6f92c8f233d7b0794c66a968106330905c6d23fdcd64ca561570758ed769",
+	"247e48689008fc34af723b56eb1e1faea15683d8b77bdaddb8ed0967b3070ed8",
+	"a5aaebed4a33c5a63036aa4de421060ee3742097384404930ac7382dae1ef25a",
+	"b536e5e79822d8de332813a67673887436042c628b4751f25e8500fd0411cbff",
 ]);
 
 describe("scripts/hooks/guard-bash.mjs -- deny list (#2699)", () => {
@@ -345,6 +459,24 @@ describe("scripts/hooks/guard-bash.mjs -- rule declarations (review round 2 T1)"
 		// fails with TS2322 before the suite even runs.
 		const rule: DenyRule = "worktreeSymlink";
 		expect(RULE_MESSAGES[rule]).toContain("node_modules");
+	});
+
+	it("declares sharedKill in the DenyRule union the .d.mts exports", () => {
+		// Same guard, for #3556's seventh rule.
+		const rule: DenyRule = "sharedKill";
+		expect(RULE_MESSAGES[rule]).toContain("pkill");
+	});
+
+	it("declares tmpCheckout in the DenyRule union the .d.mts exports", () => {
+		// Same guard, for #3526's eighth rule.
+		const rule: DenyRule = "tmpCheckout";
+		expect(RULE_MESSAGES[rule]).toContain("/tmp");
+	});
+
+	it("declares checkUngated in the DenyRule union the .d.mts exports", () => {
+		// Same guard, for #3471's ninth rule.
+		const rule: DenyRule = "checkUngated";
+		expect(RULE_MESSAGES[rule]).toContain("&&");
 	});
 });
 
@@ -514,7 +646,7 @@ describe("scripts/hooks/guard-bash.mjs -- round-2 survey corpus (#2705)", () => 
 			} else {
 				expect(result.status, command).toBe(2);
 				expect(result.stderr.toLowerCase(), command).toMatch(
-					/stash|reset|worktree|probe|tmpdir/,
+					/stash|reset|worktree|probe|tmpdir|tmp|pkill|chained/,
 				);
 			}
 		},
@@ -1526,5 +1658,280 @@ describe("scripts/hooks/guard-bash.mjs -- unbounded nesting never throws (review
 		expect(result.stderr).toContain("RangeError");
 		expect(result.stderr).not.toContain("unreadable");
 		expect(result.stderr).not.toContain("unparseable");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #3556: pkill/killall shared-tool kill guard
+// ---------------------------------------------------------------------------
+//
+// #3556 (2026-09-26): a fixer ran `pkill -f tlc2.TLC` to stop its own TLC
+// run; the pattern matches machine-wide, so it may have killed a concurrent
+// session's run too (load average ~30 at the time, a sibling TLC run failed
+// with AbortException). `runHook` always sets `cwd: repoRoot` (this
+// worktree's own absolute path), which doubles as the "worktree's absolute
+// path" the acceptance criterion's scoped form names.
+describe("scripts/hooks/guard-bash.mjs -- pkill/killall shared-tool kill guard (#3556)", () => {
+	it("allows pkill -f scoped to this worktree's own absolute path", () => {
+		const result = runHook(`pkill -f ${repoRoot}.*tlc2`);
+		expect(result.status).toBe(0);
+		expect(result.stderr).toBe("");
+	});
+
+	it("denies pkill -f scoped to a DIFFERENT worktree's path", () => {
+		const result = runHook("pkill -f /some/other/worktree.*tlc2");
+		expect(result.status).toBe(2);
+		expect(result.stderr.toLowerCase()).toContain("pkill");
+	});
+
+	it("still denies a bare (no -f) pkill even when the pattern text happens to contain the worktree path -- bare pkill matches by NAME only, never full command line", () => {
+		const result = runHook(`pkill ${repoRoot}`);
+		expect(result.status).toBe(2);
+	});
+
+	it("strips a runner prefix (sudo) before finding the -f pattern", () => {
+		const denied = runHook("sudo pkill -f tlc2.TLC");
+		expect(denied.status).toBe(2);
+		const allowed = runHook(`sudo pkill -f ${repoRoot}.*tlc2`);
+		expect(allowed.status).toBe(0);
+	});
+
+	it("a signal flag before -f does not defeat pattern parsing", () => {
+		const denied = runHook("pkill -9 -f tlc2.TLC");
+		expect(denied.status).toBe(2);
+		const allowed = runHook(`pkill -9 -f ${repoRoot}.*tlc2`);
+		expect(allowed.status).toBe(0);
+	});
+
+	it("killall is never scoped -- it matches by process NAME only, so no pattern text can allow it", () => {
+		const result = runHook(`killall -9 ${repoRoot}.*tlc2`);
+		expect(result.status).toBe(2);
+	});
+
+	it("kill <pid> is a different command entirely, unaffected by this rule", () => {
+		expect(findDeny("kill 12345")).toBeNull();
+		expect(findDeny(`kill ${repoRoot}`)).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #3526: checkout/scratch-directory-under-/tmp guard (tmpCheckout)
+// ---------------------------------------------------------------------------
+//
+// #3526 (2026-09-26): ~20 review/merge scratch checkouts accumulated under
+// /tmp (tmpfs = RAM + swap on the maintainer host), 340-420 MB each, ~10 GB
+// total, swap at 8/8 GB. `mktemp -d`'s bare (no template, no -p/--tmpdir=)
+// default depends on this test RUNNER's own ambient TMPDIR/TMP/TEMP, so
+// those two cases get their own isolated env (BASE_ENV already strips
+// PI_LENS_HOME for the same ambient-leakage reason the probe-hygiene section
+// above documents); every other case here is self-contained (an absolute
+// template, an explicit -p/--tmpdir=, or a RELATIVE template that measurably
+// lands in mktemp's own cwd -- always repoRoot in this suite, never /tmp).
+describe("scripts/hooks/guard-bash.mjs -- checkout/scratch directory under /tmp (#3526)", () => {
+	const NO_AMBIENT_TMPDIR_ENV: NodeJS.ProcessEnv = Object.fromEntries(
+		Object.entries(BASE_ENV).filter(
+			([key]) => !["TMPDIR", "TMP", "TEMP"].includes(key),
+		),
+	);
+
+	it("denies a bare `mktemp -d` (no template, no -p) with no ambient TMPDIR -- the measured default is /tmp", () => {
+		const result = runHook("mktemp -d", NO_AMBIENT_TMPDIR_ENV);
+		expect(result.status).toBe(2);
+		expect(result.stderr.toLowerCase()).toContain("/tmp");
+	});
+
+	it("allows a bare `mktemp -d` when TMPDIR is set ambient to somewhere off /tmp", () => {
+		const result = runHook("mktemp -d", {
+			...NO_AMBIENT_TMPDIR_ENV,
+			TMPDIR: "/home/dev/scratch",
+		});
+		expect(result.status).toBe(0);
+	});
+
+	it("denies TMPDIR=<off-tmp-looking-but-under-/tmp> mktemp -d -- the offending value is judged, not just its ambient absence", () => {
+		const result = runHook(
+			"TMPDIR=/tmp/pi-lens-review mktemp -d",
+			NO_AMBIENT_TMPDIR_ENV,
+		);
+		expect(result.status).toBe(2);
+	});
+
+	it("allows a git worktree add whose destination resolves under this worktree's own cwd, not /tmp", () => {
+		expect(
+			findDeny(`git worktree add ${repoRoot}/../agent-3526-new`, repoRoot),
+		).toBeNull();
+	});
+
+	it("resolves a RELATIVE git worktree add target against the payload cwd, denying when that cwd is itself under /tmp", () => {
+		// #3526's acceptance: "a git worktree add ../x from a checkout under
+		// /tmp is denied" -- built with a real cwd under /tmp so the
+		// resolution is not a fictitious path string.
+		const underTmp = "/tmp/pi-lens-guard-bash-3526-cwd-fixture";
+		expect(findDeny("git worktree add ../sibling-tree", underTmp)).toBe(
+			"tmpCheckout",
+		);
+	});
+
+	it("a literal $TMPDIR-shaped worktree destination defaults to /tmp when TMPDIR is not set on this command or ambiently", () => {
+		const result = runHook(
+			'git worktree add "$TMPDIR/foo"',
+			NO_AMBIENT_TMPDIR_ENV,
+		);
+		expect(result.status).toBe(2);
+	});
+
+	it("the SAME $TMPDIR-shaped destination allows once this command's own TMPDIR= points off /tmp", () => {
+		expect(
+			findDeny(
+				'TMPDIR=/home/dev/scratch git worktree add "$TMPDIR/foo"',
+				repoRoot,
+			),
+		).toBeNull();
+	});
+
+	it("a /tmp string inside a comment, a heredoc body, or echo text never trips the rule -- this rule reads argv WORDS, not raw text", () => {
+		expect(
+			findDeny(
+				"echo 'scratch checkouts must never land under /tmp' # reminder",
+			),
+		).toBeNull();
+		expect(
+			findDeny("cat <<'EOF'\nmktemp -d /tmp/not-a-real-command\nEOF"),
+		).toBeNull();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #3471: git commit/push chained after an ungated check (checkUngated)
+// ---------------------------------------------------------------------------
+//
+// #3471: a check (npm run lint/build/test/fmt:check/preflight, npx vitest,
+// tsc, node scripts/check-*.mjs) piped or `;`-separated from a following git
+// commit/push never gates it -- three 2026-09-25 incidents, quoted in the
+// PR body verbatim as DENY_CASES entries above; the corpus audit below (also
+// in the PR body) found the SAME shape 20 more times in real history.
+describe("scripts/hooks/guard-bash.mjs -- git commit/push chained after an ungated check (#3471)", () => {
+	it("tsc as a check", () => {
+		expect(findDeny("tsc --noEmit ; git commit -m x")).toBe("checkUngated");
+		expect(findDeny("tsc --noEmit && git commit -m x")).toBeNull();
+	});
+
+	it("node scripts/check-*.mjs as a check", () => {
+		expect(
+			findDeny("node scripts/check-pr-body.mjs 123 ; git push origin y"),
+		).toBe("checkUngated");
+		expect(
+			findDeny("node scripts/check-pr-body.mjs 123 && git push origin y"),
+		).toBeNull();
+	});
+
+	it("a DIFFERENT node script is not a check", () => {
+		expect(findDeny("node scripts/build.mjs ; git commit -m x")).toBeNull();
+	});
+
+	it("no preceding check at all allows -- this is not a general 'write must be && or terminal' rule (it would deny the repo's own sanctioned `commit; status` pattern)", () => {
+		expect(findDeny('git commit -m "x" ; git status')).toBeNull();
+		expect(findDeny("echo hi; git push origin y")).toBeNull();
+	});
+
+	it("the backward search for the nearest check stops at an earlier write", () => {
+		// npm run lint DOES gate the push (&&); the commit that follows is a
+		// fresh boundary, not judged against the lint check at all.
+		expect(
+			findDeny("npm run lint && git push origin y ; git commit -m x"),
+		).toBeNull();
+	});
+
+	it("a check piped to a filter (grep/tail/head) before an unconditional write -- the pipeline's exit status is the FILTER's, not the check's", () => {
+		expect(
+			findDeny(
+				"npm run build 2>&1 | tail -1 && git add -A && git commit -m x && git push origin y",
+			),
+		).toBe("checkUngated");
+	});
+
+	it("shell control flow (if/then/fi deciding from a saved $?) is left alone rather than guessed at", () => {
+		// This repo's OWN convention (audited in the corpus, PR body): save
+		// the check's exit code, then gate through `if`, not `&&`. A pure
+		// separator scan cannot see that gate, so it stands aside entirely
+		// rather than deny a properly-gated write.
+		expect(
+			findDeny(
+				"npm run build; vexit=$?; if [ $vexit -eq 0 ]; then git add -A && git commit -m x; fi",
+			),
+		).toBeNull();
+	});
+
+	it("splitSegmentsWithSeparators tags each segment with its preceding separator, null for the first", () => {
+		expect(splitSegmentsWithSeparators("a && b || c ; d | e & f\ng")).toEqual([
+			{ text: "a ", sep: null },
+			{ text: " b ", sep: "&&" },
+			{ text: " c ", sep: "||" },
+			{ text: " d ", sep: ";" },
+			{ text: " e ", sep: "|" },
+			{ text: " f", sep: "&" },
+			{ text: "g", sep: "\n" },
+		]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #3471 lexer fix: a redirection `&` is not a segment separator
+// ---------------------------------------------------------------------------
+//
+// Found building #3471's chain scan: `2>&1`'s lone `&` matched the plain
+// SEGMENT_SEPARATOR regex unconditionally, splitting `npm run lint
+// >/dev/null 2>&1 && git commit …` (the issue's own case 1, rewritten with
+// `&&` -- exactly the form checkUngated must ALLOW) into bogus segments and
+// corrupting the separator a later segment was tagged with. Measured against
+// real bash in the PR body (`2>&1`, `>f 2>&1`, `&> f`, `1>&2` are all single
+// redirection tokens, never a background operator or half of `&&`).
+describe("scripts/hooks/guard-bash.mjs -- a redirection `&` is not a segment separator (#3471)", () => {
+	it("2>&1 does not break a following && chain", () => {
+		expect(
+			findDeny("npm run lint >/dev/null 2>&1 && git commit -m x"),
+		).toBeNull();
+		expect(splitSegments("echo hi >/dev/null 2>&1 && echo bye")).toEqual([
+			"echo hi >/dev/null 2>&1 ",
+			" echo bye",
+		]);
+	});
+
+	it("a bare stdout-to-file redirect then 2>&1 still keeps one segment", () => {
+		expect(
+			splitSegmentsWithSeparators("echo hi >f.log 2>&1 && echo bye"),
+		).toEqual([
+			{ text: "echo hi >f.log 2>&1 ", sep: null },
+			{ text: " echo bye", sep: "&&" },
+		]);
+	});
+
+	it("1>&2 (duplicating stdout onto stderr) is the same shape, reversed", () => {
+		expect(splitSegments("echo hi 1>&2 && echo bye")).toEqual([
+			"echo hi 1>&2 ",
+			" echo bye",
+		]);
+	});
+
+	it("bash's &> (redirect both) form is recognized from the OTHER side (& followed by >)", () => {
+		expect(splitSegments("echo hi &> f.log && echo bye")).toEqual([
+			"echo hi &> f.log ",
+			" echo bye",
+		]);
+	});
+
+	it("a REAL background & (not adjacent to a redirect operator) is still a live separator", () => {
+		expect(findDeny("sleep 1 & git stash")).toBe("stash");
+		expect(splitSegments("sleep 1 & git stash")).toEqual([
+			"sleep 1 ",
+			" git stash",
+		]);
+	});
+
+	it("&& is still recognized as one two-character separator, not defeated by the redirect-ampersand check", () => {
+		expect(splitSegments("echo hi && echo bye")).toEqual([
+			"echo hi ",
+			" echo bye",
+		]);
 	});
 });
