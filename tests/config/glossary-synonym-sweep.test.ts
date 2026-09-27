@@ -570,7 +570,10 @@ const PINS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
 		"clients/installer/index.ts": 4,
 		"clients/installer/managed-tool-refresh.ts": 2,
 		"clients/instance-reaper.ts": 3,
-		"clients/instance-registry.ts": 11,
+		// 11 → 10 (#3587): deregisterInstanceRootNow's whole-entry removal now
+		// shares withoutOwnEntry's own `.filter(` instead of inlining a second
+		// one; the net `.filter(` count in the file drops by one.
+		"clients/instance-registry.ts": 10,
 		"clients/knip-client.ts": 3,
 		"clients/language-policy.ts": 2,
 		"clients/language-profile.ts": 2,
