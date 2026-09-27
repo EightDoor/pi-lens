@@ -891,13 +891,19 @@ function substituteTempDirPrefix(pathArg, env) {
 			);
 		if (!m) break;
 		const name = m[1] ?? m[2];
-		let value;
-		if (TEMP_DIR_VARS.includes(name)) {
-			value = env[name] ?? process.env[name] ?? TMP_ROOT;
-		} else {
-			value = env[name];
-			if (value === undefined) break;
-		}
+		const value = TEMP_DIR_VARS.includes(name)
+			? (env[name] ?? process.env[name] ?? TMP_ROOT)
+			: env[name];
+		// An unresolvable OTHER variable is left as literal text (documented
+		// blind spot: `value` stays `undefined`, so `current` gains the
+		// literal substring "undefined" in its place) -- measured to be
+		// behaviorally inert for this function's only observable output
+		// (whether the final resolved path sits under /tmp): neither
+		// "$UNKNOWN" nor "undefined" is absolute or means anything special to
+		// {@link resolve}, so both fall through to the SAME relative-path
+		// resolution against `cwd`. An earlier version special-cased this
+		// with its own `break`; deleted after mutating it out left every
+		// test in this file green (#3526 review round 2 self-check).
 		current = expandHomePrefix(value + current.slice(m[0].length));
 	}
 	return current;
