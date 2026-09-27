@@ -1609,9 +1609,9 @@ const CONTROL_FLOW_WORDS = new Set([
  * separators. The backward search for that nearest check STOPS at an
  * earlier write (a completed commit/push is a fresh boundary -- #3471's own
  * proposal is about a check's result never gating ITS OWN following write,
- * not every write for the rest of the command; this is also what keeps the
- * repo's own sanctioned `git commit -m x; git status` pattern, quoted in
- * this file's fixer-playbook sibling, allowed: no check precedes it at all,
+ * not every write for the rest of the command; this is also what keeps an
+ * ordinary `git commit -m x; git status` -- a sequential status check after
+ * a commit, with no check anywhere -- allowed: no check precedes it at all,
  * so no write is judged).
  *
  * A `null` return for a write with NO preceding check (case 3 of #3471: a

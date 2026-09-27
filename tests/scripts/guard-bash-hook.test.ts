@@ -338,9 +338,10 @@ const ALLOW_CASES: string[] = [
 	// #3471: fully `&&`-gated -- the issue's own case 1 and case 2, rewritten.
 	'npm run lint >/dev/null 2>&1 && git add -A && git commit -m "x"',
 	"npx vitest run tests/foo.test.ts && git add -A && git commit -m x && git push origin y",
-	// The repo's own sanctioned pattern (this file's fixer-playbook sibling:
-	// "Run git status after the commit completes to verify success") -- no
-	// check precedes the commit at all, so nothing is judged.
+	// An ordinary sequential status check after a commit -- no check precedes
+	// the commit at all, so nothing is judged. A general "a write must be
+	// &&-only or command-final" rule would deny this harmless pattern; see
+	// the PR body for why that shape was rejected.
 	'git commit -m "x" ; git status',
 	// A write gated by an EARLIER write via && -- the boundary-stop search
 	// for the nearest check must not reach back past it.
