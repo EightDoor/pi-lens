@@ -484,6 +484,13 @@ const ADMITTED_AFTER_BASELINE: Readonly<
 		reason:
 			"the CLI's real exit code (2 vs. 4) and GITHUB_OUTPUT side effect are unobservable from an in-process stub",
 	},
+	// #3674: git's own per-worktree resolution of core.hooksPath and the real
+	// husky binary are the subject; a double would restate the path it wrote.
+	"real-process-spawn:scripts/setup-git-hooks.test.ts": {
+		detector: "real-process-spawn",
+		reason:
+			"git resolves core.hooksPath per worktree at its own process boundary; the real script and husky binary are the subject",
+	},
 	// 2026-09-06 (#2369): the fixture-ordering defect (an earlier LSP_FIXTURES
 	// entry registering a foreign session root, declining a later one) lives
 	// in the CLI's own module-load order; only a real child process is the

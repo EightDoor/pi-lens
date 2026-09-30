@@ -88,15 +88,19 @@ function makeClone(options: { bareMain?: boolean } = {}) {
 		});
 	const hookRan = (cwd: string) => {
 		fs.rmSync(path.join(cwd, ".hook-ran"), { force: true });
-		const hook = spawnSync("git", ["hook", "run", "pre-commit"], {
-			cwd,
-			env,
-			encoding: "utf8",
-		});
+		let status = 0;
+		try {
+			gitExecFileSync("git", ["hook", "run", "pre-commit"], {
+				cwd,
+				env,
+				stdio: "pipe",
+			});
+		} catch (error) {
+			status = (error as { status: number }).status;
+		}
 		const sentinel = path.join(cwd, ".hook-ran");
 		return {
-			status: hook.status,
-			stderr: hook.stderr,
+			status,
 			cwd: fs.existsSync(sentinel)
 				? fs.readFileSync(sentinel, "utf8").trim()
 				: undefined,
