@@ -80,8 +80,7 @@ function mainWorktreeRoot() {
 		},
 	);
 	const [first, second] = listing.split("\0");
-	if (!first?.startsWith("worktree ") || second === "bare")
-		return process.cwd();
+	if (second === "bare") return process.cwd();
 	return first.slice("worktree ".length);
 }
 
@@ -89,16 +88,10 @@ try {
 	const huskyBin = path.resolve("node_modules/husky/bin.js");
 	const root = mainWorktreeRoot();
 	execFileSync(process.execPath, [huskyBin], { cwd: root, stdio: "inherit" });
-	// husky reports its own refusals on stdout with exit 0; only pin the
-	// absolute path when the stubs actually exist.
 	const hooksDir = path.join(root, ".husky", "_");
-	if (existsSync(path.join(hooksDir, "h"))) {
-		execFileSync(
-			"git",
-			["-C", root, "config", "core.hooksPath", hooksDir.replaceAll("\\", "/")],
-			{ stdio: "inherit" },
-		);
-	}
+	execFileSync("git", ["-C", root, "config", "core.hooksPath", hooksDir], {
+		stdio: "inherit",
+	});
 } catch (error) {
 	// Best-effort: a broken git-hooks install must never fail `npm install`.
 	console.warn(
