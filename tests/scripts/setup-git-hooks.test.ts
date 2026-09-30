@@ -228,9 +228,9 @@ describe.skipIf(process.platform === "win32")(
 			});
 			const result = prepare(main, { HUSKY: "0" });
 			expect(result.status).toBe(0);
-			expect(result.stdout).toContain("skipped (HUSKY=0)");
 			expect(fs.existsSync(huskyMarker)).toBe(false);
 			expect(() => git(main, "config", "core.hooksPath")).toThrow();
+			expect(result.stdout).toContain("skipped (HUSKY=0)");
 		});
 
 		it("without HUSKY=0 the stub husky IS invoked (the arm above can go red)", () => {
@@ -255,8 +255,8 @@ describe.skipIf(process.platform === "win32")(
 			const before = snapshotRepo(foreign);
 			const result = runScript(dir, foreign);
 			expect(result.status).toBe(0);
-			expect(result.stdout).toContain("not pi-lens's own git checkout");
 			expect(snapshotRepo(foreign)).toEqual(before);
+			expect(result.stdout).toContain("not pi-lens's own git checkout");
 		});
 
 		it("a pi-lens-named package nested in someone else's repo (no git repo of its own) leaves that repo alone", () => {
@@ -271,9 +271,9 @@ describe.skipIf(process.platform === "win32")(
 			const before = snapshotRepo(outer);
 			const result = runScript(dir, nested);
 			expect(result.status).toBe(0);
-			expect(result.stdout).toContain("not pi-lens's own git checkout");
 			expect(snapshotRepo(outer)).toEqual(before);
 			expect(fs.existsSync(path.join(nested, ".husky"))).toBe(false);
+			expect(result.stdout).toContain("not pi-lens's own git checkout");
 		});
 
 		it("inherited GIT_DIR / GIT_WORK_TREE cannot redirect the wiring to another repo", () => {

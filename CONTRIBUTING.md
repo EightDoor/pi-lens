@@ -48,7 +48,10 @@ and pins `core.hooksPath` to that absolute `.husky/_`, even when `npm install`
 runs inside a linked worktree that may be deleted later. Linked worktrees run
 the main checkout's `.husky/` scripts, in their own cwd. Moving the clone
 leaves the absolute path dangling until the next `npm install` rewrites it;
-`HUSKY=0` and `PI_LENS_SKIP_HOOKS` still skip the wiring.
+`HUSKY=0` and `PI_LENS_SKIP_HOOKS` still skip the wiring, and so does any
+checkout that is not pi-lens's own (package name `pi-lens`, and Git's toplevel
+equal to the script's package root): an `npm link`, a workspace or a package
+nested in another repo is never rewritten.
 
 Skip either hook with `PI_LENS_SKIP_HOOKS=<anything> git commit ...` /
 `git push ...` (any non-empty value works). Agents and CI should set this —
